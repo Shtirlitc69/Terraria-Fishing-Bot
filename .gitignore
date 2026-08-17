@@ -1,0 +1,13 @@
+# PyInstaller output
+release/
+.pyinstaller_build/
+.build_backup/
+
+# Legacy build folder (old layout)
+build/
+
+# Local user data copies at repo root (if any)
+preferences.json
+statistics.json
+projectile_probe.jsonl
+src/projectile_probe.jsonl
