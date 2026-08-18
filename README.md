@@ -6,6 +6,10 @@ Memory-based fishing helper for Terraria **1.4.5.6** on Windows. It reads the li
 
 Use the default **32-bit Steam** build. Do not add `-autoarch` (that starts 64-bit Terraria; the bot will refuse to attach).
 
+![Bot UI](docs/ui.jpg)
+
+![Bot in use](docs/demo.gif)
+
 ## Warning
 
 Multiplayer use may violate the game ToS. Prefer single-player / offline.
