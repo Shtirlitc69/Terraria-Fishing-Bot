@@ -1,16 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
 
 datas = [
     ('src/data', 'data'),
     ('src/locale', 'locale'),
+    ('src/gui/styles', 'gui/styles'),
     ('src/icon.ico', '.'),
     ('src/preferences.json', '.'),
     ('src/statistics.json', '.'),
 ]
-datas += collect_data_files('customtkinter')
 
 a = Analysis(
     ['src/Fishing bot.py'],
@@ -28,6 +27,21 @@ a = Analysis(
         'memory_bot',
         'projectile_probe',
         'pymem',
+        'gui',
+        'gui.paths',
+        'gui.prefs',
+        'gui.theme',
+        'gui.widgets',
+        'gui.bridge',
+        'gui.auto_drink',
+        'gui.catch_tab',
+        'gui.stats_tab',
+        'gui.settings_tab',
+        'gui.window',
+        'PySide6.QtCore',
+        'PySide6.QtGui',
+        'PySide6.QtWidgets',
+        'shiboken6',
     ],
     hookspath=[],
     hooksconfig={},
@@ -37,6 +51,23 @@ a = Analysis(
         'pandas',
         'scipy',
         'matplotlib',
+        'customtkinter',
+        'PySide6.QtQml',
+        'PySide6.QtQuick',
+        'PySide6.QtQuick3D',
+        'PySide6.QtWebEngine',
+        'PySide6.QtWebEngineCore',
+        'PySide6.QtWebEngineWidgets',
+        'PySide6.QtMultimedia',
+        'PySide6.QtMultimediaWidgets',
+        'PySide6.Qt3DCore',
+        'PySide6.Qt3DRender',
+        'PySide6.QtPositioning',
+        'PySide6.QtBluetooth',
+        'PySide6.QtSensors',
+        'PySide6.QtPdf',
+        'PySide6.QtPdfWidgets',
+        'PySide6.QtRemoteObjects',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

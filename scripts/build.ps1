@@ -48,21 +48,29 @@ function Assert-ReleaseUnlocked {
     }
 }
 
+function Test-QtBundle([string]$internalDir) {
+    $dll = Get-ChildItem -LiteralPath $internalDir -Recurse -Filter "Qt6Widgets.dll" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $dll) {
+        throw "Build failed: Qt6Widgets.dll missing in $internalDir"
+    }
+    $qss = Join-Path $internalDir "gui\styles\dark.qss"
+    if (-not (Test-Path $qss)) {
+        throw "Build failed: QSS missing: $qss"
+    }
+}
+
 function Install-ReleaseBundle {
     $outputDir = Join-Path $ReleaseDir "Fishing bot"
     $srcExe = Join-Path $outputDir "Fishing bot.exe"
     $srcInternal = Join-Path $outputDir "_internal"
     $destExe = Join-Path $ReleaseDir "Fishing bot.exe"
     $destInternal = Join-Path $ReleaseDir "_internal"
-    $themeRel = "customtkinter\assets\themes\blue.json"
-    $srcTheme = Join-Path $srcInternal $themeRel
 
     if (-not (Test-Path $srcExe) -or -not (Test-Path $srcInternal)) {
         throw "Build failed: PyInstaller output missing in $outputDir"
     }
-    if (-not (Test-Path $srcTheme)) {
-        throw "Build failed: customtkinter theme missing: $srcTheme"
-    }
+    Test-QtBundle $srcInternal
 
     Assert-ReleaseUnlocked
 
@@ -85,9 +93,7 @@ function Install-ReleaseBundle {
     Copy-Item $srcInternal $stagingInternal -Recurse -Force
     Copy-Item $srcExe $stagingExe -Force
 
-    if (-not (Test-Path (Join-Path $stagingInternal $themeRel))) {
-        throw "Build failed: staged _internal is missing $themeRel"
-    }
+    Test-QtBundle $stagingInternal
 
     if (Test-Path $destInternal) {
         try {
@@ -137,13 +143,10 @@ if (Test-Path $StatsBackup) {
 }
 
 $ExePath = Join-Path $ReleaseDir "Fishing bot.exe"
-$ThemePath = Join-Path $ReleaseDir "_internal\customtkinter\assets\themes\blue.json"
 if (-not (Test-Path $ExePath)) {
     throw "Build failed: $ExePath not found"
 }
-if (-not (Test-Path $ThemePath)) {
-    throw "Build failed: $ThemePath not found"
-}
+Test-QtBundle (Join-Path $ReleaseDir "_internal")
 
 $WorkPath = Join-Path $Root ".pyinstaller_build"
 if (Test-Path $WorkPath) {

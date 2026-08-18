@@ -22,6 +22,9 @@ PROBE_WINDOW_S = 2.0
 PROBE_SNAPSHOT_S = 0.05
 PROJECTILE_ARRAY_LENS = frozenset((1000, 1001))
 PROJ_STATIC_OFF_FROM_PLAYER = 0x4C
+# Same content-based thresholds as memory_bot.py's _is_projectile_array.
+PROJECTILE_MIN_NON_NULL = 20
+PROJECTILE_MIN_WHOAMI_MATCH = 10
 OBJ_PREFIX = 0x80  # through type at +0x7C
 HYP_WHOAMI_OFF = 0x04
 HYP_ACTIVE_OFF = 0x08
@@ -36,6 +39,7 @@ MAX_PROJECTILES_PER_SNAPSHOT = 1001
 OCCUPANCY_SAMPLE = 32
 BOBBER_TYPES = frozenset(
     list(range(360, 367)) + list(range(378, 383)) + list(range(760, 765))
+    + [775] + list(range(986, 994))
 )
 
 
@@ -44,12 +48,11 @@ def _hex_addr(addr: int) -> str:
 
 
 def _rank_array_candidate(r: dict):
-    near = r.get("near") or ""
+    """Rank whoAmI==index matches first, then non_null. A length-1000
+    table with ~257 pointers and whoami_matches=0 is not Main.projectile.
+    """
     dist = int(r.get("dist") or 0)
     return (
-        0 if near == "host_cache" else 1 if near == "player_rel" else 2,
-        0 if r.get("length") == 1001 else 1,
-        0 if dist == PROJ_STATIC_OFF_FROM_PLAYER else 1,
         -int(r.get("whoami_matches") or 0),
         -int(r.get("non_null") or 0),
         dist,
@@ -419,11 +422,17 @@ class ProjectileProbe:
                         what="player_rel_projectile_static",
                     )
         if reason == "recast" and found:
-            ranked = sorted(
-                found.values(),
-                key=_rank_array_candidate,
-            )
-            return ranked
+            rich = [
+                c for c in found.values()
+                if c.get("non_null", 0) >= PROJECTILE_MIN_NON_NULL
+                and c.get("whoami_matches", 0) >= PROJECTILE_MIN_WHOAMI_MATCH
+            ]
+            if rich:
+                return sorted(rich, key=_rank_array_candidate)
+            # host_cache/player_rel candidates exist but look empty (the
+            # decoy shape) - don't trust them silently, fall through to the
+            # full scan below instead of reporting a hollow array as ground
+            # truth for a recast window.
         for near, around in arounds:
             page = around & ~0xFFF
             start = max(0x10000, page - STATIC_SCAN_BACK)

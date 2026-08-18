@@ -1,4 +1,4 @@
-customtkinter>=5.2.0
+PySide6>=6.6.0
 pywin32>=306
 pyinstaller>=6.0
 pymem>=1.14.0

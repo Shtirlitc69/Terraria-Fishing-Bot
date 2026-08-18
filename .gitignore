@@ -1,13 +1,35 @@
-# PyInstaller output
+# PyInstaller / freeze output (users download the zip from GitHub Releases)
 release/
 .pyinstaller_build/
 .build_backup/
-
-# Legacy build folder (old layout)
 build/
+dist/
 
-# Local user data copies at repo root (if any)
-preferences.json
-statistics.json
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# IDE / editor
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Runtime data next to a local exe or repo root (keep src/ templates tracked)
+/preferences.json
+/statistics.json
 projectile_probe.jsonl
-src/projectile_probe.jsonl

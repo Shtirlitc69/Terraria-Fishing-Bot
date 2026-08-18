@@ -51,12 +51,19 @@
   "mem_context_null": "Found FishingCheck but fishing context is empty. Cast once, wait a second, then press Start again.",
   "mem_player_missing": "Found the fishing hook but not the local player object. Stay in the world (don't be on the menu) and press Start again.",
   "mem_error": "Memory hook failed: {error}",
-  "mem_skip": "Bite id={id} skipped (not on catch list).",
+  "mem_skip": "Bite id={id} ({name}) skipped.",
   "mem_reel_failed": "Reel did not register. Reset the cast point with the Cast point button.",
   "mem_recast_failed": "Recast did not register. Retrying the recast click.",
   "mem_safe_stop": "Recast stopped for safety ({reason}). Mouse button released. Press Start to continue.",
+  "mem_safe_stop_reason_no_aim": "no cast point",
   "mem_focus_failed": "Could not focus Terraria. Run the game and the bot at the same privilege level (both normal, or both as administrator).",
   "unknown_item": "Unknown item #{id}",
   "log_copy": "Copy",
-  "log_select_all": "Select all"
+  "log_select_all": "Select all",
+  "log_copy_all": "Copy log",
+  "window_mode": "Window mode:",
+  "window_normal": "Normal",
+  "window_frameless": "Frameless",
+  "window_fullscreen": "Fullscreen",
+  "theme_applied": "{theme} color theme applied."
 }

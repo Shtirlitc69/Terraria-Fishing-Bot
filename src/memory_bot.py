@@ -74,6 +74,14 @@ OFF_PROJ_TYPE = 0x7C
 STATIC_SCAN_RADIUS = 0x40000  # ±256 KiB around a context static
 PROJECTILE_ARRAY_LEN = 1001
 PROJECTILE_ARRAY_LENS = frozenset((1000, 1001))
+# Content-based validation of a candidate Main.projectile array (see
+# _projectile_array_richness). Live data: the real array is length 1001,
+# dense, with many whoAmI==index matches. A nearby length-1000 table with
+# ~257 non-null slots and whoami_matches=0 is not Main.projectile. Dummy-only
+# 1001 (slot 1000 only) is a stale/empty table, not the live array.
+PROJECTILE_VALIDATE_SLOTS = 300
+PROJECTILE_MIN_NON_NULL = 20
+PROJECTILE_MIN_WHOAMI_MATCH = 10
 PROJECTILE_LIVE_SLOTS = 1000  # dummy extra slot 1000 is ignored
 PROJ_STATIC_OFF_FROM_PLAYER = 0x4C  # Main.projectile = Main.player - 0x4C
 PROJ_OCCUPANCY_SAMPLE = 32
@@ -81,6 +89,7 @@ PROJ_OCCUPANCY_MIN = 2  # unused as a recast gate; dummy-only 1001 is valid
 BOBBER_OBJ_PREFIX = 0x80  # through type at +0x7C
 BOBBER_TYPES = frozenset(
     list(range(360, 367)) + list(range(378, 383)) + list(range(760, 765))
+    + [775] + list(range(986, 994))
 )
 ROLLED_ITEM_DROP_OFF = 0x68
 HOOK_ERROR_CANDIDATES_MAX = 24
@@ -515,7 +524,8 @@ class MemoryBot:
                 )
                 last_fish_id = item_id
                 allow = item_id in self.whitelist_ids
-                self.on_status(f"bite:{item_id}:{'allow' if allow else 'skip'}")
+                if not allow:
+                    self.on_status(f"bite:{item_id}:skip")
                 if allow:
                     self._phase(f"reel_begin id={item_id}")
                     if not self._reel_until_started():
@@ -823,28 +833,57 @@ class MemoryBot:
                 matches += 1
         return matches, non_null
 
-    def _is_projectile_array(self, arr: int) -> bool:
-        """length 1000/1001 and dummy whoAmI==length-1. Slots 0..999 may be null."""
+    def _projectile_array_richness(self, arr: int) -> Optional[tuple]:
+        """(non_null, whoami_matches) over the first PROJECTILE_VALIDATE_SLOTS
+        slots, or None if `arr` isn't even a plausible array header.
+
+        NOTE: dummy whoAmI on slot 1000 is not a signature. The live
+        Main.projectile array is dense with many whoAmI==index matches in
+        0..999. Reject dummy-only 1001 tables and length-1000 neighbors
+        with non-null slots but whoami_matches=0 (not Main.projectile).
+        """
         if not (0x10000 < arr < USER_SPACE_END):
-            return False
+            return None
         try:
             length = self._read_u32(arr + 4)
         except RuntimeError:
-            return False
+            return None
         if length not in PROJECTILE_ARRAY_LENS:
-            return False
-        dummy = length - 1
+            return None
+        n = min(length, PROJECTILE_VALIDATE_SLOTS)
         try:
-            ptr = self._read_u32(arr + 8 + dummy * 4)
+            blob = self._read_u32_table(arr + 8, n)
         except RuntimeError:
+            return None
+        non_null = 0
+        who_matches = 0
+        for i in range(n):
+            ptr = int.from_bytes(blob[i * 4:i * 4 + 4], "little")
+            if not (0x10000 < ptr < USER_SPACE_END):
+                continue
+            non_null += 1
+            try:
+                who = self._read_u32(ptr + HYP_WHOAMI_OFF)
+            except RuntimeError:
+                continue
+            if who == i:
+                who_matches += 1
+        return (non_null, who_matches)
+
+    def _is_projectile_array(self, arr: int) -> bool:
+        """length 1000/1001 with a real, populated live-object range.
+
+        Rejects decoy static slots that share the length but are otherwise
+        empty (see _projectile_array_richness docstring).
+        """
+        richness = self._projectile_array_richness(arr)
+        if richness is None:
             return False
-        if not (0x10000 < ptr < USER_SPACE_END):
-            return False
-        try:
-            who = self._read_u32(ptr + HYP_WHOAMI_OFF)
-        except RuntimeError:
-            return False
-        return who == dummy
+        non_null, who_matches = richness
+        return (
+            non_null >= PROJECTILE_MIN_NON_NULL
+            and who_matches >= PROJECTILE_MIN_WHOAMI_MATCH
+        )
 
     def _projectile_static_ok(self, slot: int) -> bool:
         if not slot:
@@ -878,7 +917,12 @@ class MemoryBot:
         return self._find_projectile_array_static(around)
 
     def _find_projectile_array_static(self, around: int) -> int:
-        """Fallback: nearest length-1000/1001 with dummy whoAmI, prefer 1001."""
+        """Fallback: static slot pointing at the richest length-1000/1001
+        array nearby. Rank whoAmI==index matches first, then non_null.
+        Length-1000 tables with many pointers but whoami_matches=0 are not
+        Main.projectile. Runs once per hook session (cached); recast must
+        not call this.
+        """
         if not around:
             return 0
         start = max(0x10000, around - STATIC_SCAN_RADIUS)
@@ -893,18 +937,22 @@ class MemoryBot:
                 arr = self._read_u32(slot)
             except RuntimeError:
                 continue
-            if not self._is_projectile_array(arr):
+            richness = self._projectile_array_richness(arr)
+            if richness is None:
                 continue
-            try:
-                length = self._read_u32(arr + 4)
-            except RuntimeError:
+            non_null, who_matches = richness
+            if (
+                non_null < PROJECTILE_MIN_NON_NULL
+                or who_matches < PROJECTILE_MIN_WHOAMI_MATCH
+            ):
                 continue
-            cands.append((slot, arr, length))
+            cands.append((slot, non_null, who_matches))
         if not cands:
             return 0
         cands.sort(
             key=lambda c: (
-                0 if c[2] == PROJECTILE_ARRAY_LEN else 1,
+                -c[2],  # whoAmI==index matches first
+                -c[1],  # then non-null slots
                 abs(c[0] - around),
                 c[0],
             )
@@ -1124,6 +1172,12 @@ class MemoryBot:
         self._projectile_static = 0
         if not self._player_static:
             return False
+        # Hook-setup already ran scan=True and cached the slot. Recast must
+        # not pay for ±STATIC_SCAN_RADIUS; reuse the slot if still valid.
+        cached = _HOOK_CACHE.get("projectile_static") or 0
+        if cached and self._projectile_static_ok(cached):
+            self._projectile_static = cached
+            return True
         self._projectile_static = self._resolve_projectile_static(
             self._player_static, scan=False
         )
@@ -1382,6 +1436,27 @@ class MemoryBot:
             if up:
                 self._bot_lmb_depth = max(0, self._bot_lmb_depth - 1)
 
+    def _send_mouse_click(self) -> bool:
+        """LEFTDOWN+LEFTUP in one SendInput so LMB is not held across a frame."""
+        self._bot_lmb_depth += 1
+        extra = ULONG_PTR(0)
+        arr = (INPUT * 2)()
+        for i, flags in enumerate(
+            (win32con.MOUSEEVENTF_LEFTDOWN, win32con.MOUSEEVENTF_LEFTUP)
+        ):
+            arr[i].type = INPUT_MOUSE
+            arr[i].mi.dx = 0
+            arr[i].mi.dy = 0
+            arr[i].mi.mouseData = 0
+            arr[i].mi.dwFlags = flags
+            arr[i].mi.time = 0
+            arr[i].mi.dwExtraInfo = extra.value
+        try:
+            sent = user32.SendInput(2, arr, ctypes.sizeof(INPUT))
+            return sent == 2
+        finally:
+            self._bot_lmb_depth = max(0, self._bot_lmb_depth - 1)
+
     def _aim_cursor(self, hwnd: int) -> bool:
         if not self.aim_client:
             return False
@@ -1439,7 +1514,6 @@ class MemoryBot:
             self._aim_cursor(hwnd)
             self._sleep_interruptible(AIM_SETTLE_S)
         before = self._item_animation()
-        t0 = time.monotonic()
         self._send_mouse(win32con.MOUSEEVENTF_LEFTDOWN)
         anim_hold = before
         first = True
@@ -1453,7 +1527,6 @@ class MemoryBot:
                     break
                 time.sleep(USE_ITEM_PULSE_S)
         finally:
-            hold_ms = int((time.monotonic() - t0) * 1000)
             self._send_mouse(win32con.MOUSEEVENTF_LEFTUP)
             self._write_use_item(0)
         anim_end = self._item_animation()
@@ -1461,47 +1534,18 @@ class MemoryBot:
             self._animation_rose(before, anim_hold)
             or self._animation_rose(before, anim_end)
         )
-        self.on_status(
-            f"click:{kind} before={before} hold={anim_hold} end={anim_end} "
-            f"rose={int(rose)} hold_ms={hold_ms}"
-        )
         return rose
 
     def _recast_click(self) -> bool:
-        """Hold LMB until a new bobber or itemAnimation rises, then release."""
+        """One-shot cast: one releaseUseItem edge and an atomic LMB click.
+
+        Do not sleep between DOWN and UP: Windows timer sleep of 16 ms is
+        ~31 ms, two frames, and the second use reels the new bobber.
+        """
         if not self.aim_client:
             if not self.stop_event.is_set():
                 self._safe_stop("no_aim")
             return False
-        have_array = False
-        try:
-            have_array = bool(self._ensure_projectile_array())
-        except (RuntimeError, ScanAborted):
-            if self.stop_event.is_set():
-                self._lmb_release()
-                return False
-            self._safe_stop("read_error")
-            return False
-
-        before = set()
-        if have_array:
-            wait_deadline = time.monotonic() + RECAST_OLD_BOBBER_WAIT_S
-            try:
-                while time.monotonic() < wait_deadline and not self.stop_event.is_set():
-                    if not self._list_bobbers():
-                        break
-                    time.sleep(0.02)
-                if self.stop_event.is_set():
-                    self._lmb_release()
-                    return False
-                before = set(self._list_bobbers())
-            except RuntimeError:
-                self._safe_stop("read_error")
-                return False
-            if before:
-                self._safe_stop("old_bobber")
-                return False
-
         self._ensure_terraria_focused()
         hwnd = self._find_terraria_hwnd()
         if hwnd:
@@ -1510,78 +1554,13 @@ class MemoryBot:
         if self.stop_event.is_set():
             self._lmb_release()
             return False
-
-        down_sent = False
-        appeared = None
-        anim_rose = False
-        t0 = time.monotonic()
-        first = True
-        before_anim = self._item_animation()
-        try:
-            self._send_mouse(win32con.MOUSEEVENTF_LEFTDOWN)
-            down_sent = True
-            hold_deadline = time.monotonic() + RECAST_HOLD_MAX_S
-            while time.monotonic() < hold_deadline and not self.stop_event.is_set():
-                self._write_use_item(1, edge=first)
-                first = False
-                anim = self._item_animation()
-                if self._animation_rose(before_anim, anim):
-                    anim_rose = True
-                    break
-                if have_array:
-                    now = set(self._list_bobbers())
-                    new = list(now - before)
-                    if len(new) == 1:
-                        appeared = new[0]
-                        break
-                    if len(new) >= 2:
-                        self._lmb_release()
-                        down_sent = False
-                        self._safe_stop("ambiguous")
-                        return False
-                time.sleep(RECAST_POLL_S)
-        except RuntimeError:
-            self._lmb_release()
-            down_sent = False
-            self._safe_stop("read_error")
-            return False
-        finally:
-            if down_sent:
-                self._lmb_release()
-                down_sent = False
-
-        hold_ms = int((time.monotonic() - t0) * 1000)
-        if self.stop_event.is_set() and appeared is None and not anim_rose:
-            return False
-        if appeared is None and not anim_rose:
-            self._safe_stop("timeout")
-            return False
         if self._probe is not None and self._probe_enabled:
             self._probe.request_recast()
-
-        if appeared is not None:
-            slot, ptr = appeared
-            stable_deadline = time.monotonic() + RECAST_STABLE_S
-            try:
-                while time.monotonic() < stable_deadline and not self.stop_event.is_set():
-                    now = set(self._list_bobbers())
-                    if (slot, ptr) not in now:
-                        self._safe_stop("vanished")
-                        return False
-                    time.sleep(RECAST_POLL_S)
-            except RuntimeError:
-                self._safe_stop("read_error")
-                return False
-            if self.stop_event.is_set():
-                return False
-            self._phase(f"recast_ok slot={slot} ptr={ptr:#x} hold_ms={hold_ms}")
-            self.on_status(
-                f"click:recast slot={slot} ptr={ptr:#x} hold_ms={hold_ms} rose=0"
-            )
-            return True
-
-        self._phase(f"recast_ok anim hold_ms={hold_ms}")
-        self.on_status(f"click:recast hold_ms={hold_ms} rose=1")
+        self._write_use_item(1, edge=True)
+        self._send_mouse_click()
+        self._write_use_item(0)
+        if self.stop_event.is_set():
+            return False
         return True
 
     def _reel_until_started(self) -> bool:
@@ -1605,8 +1584,7 @@ class MemoryBot:
             time.sleep(min(0.05, deadline - time.monotonic()))
 
     def _phase(self, msg: str):
-        dt = (time.monotonic() - self._t0) if self._t0 else 0.0
-        self.on_status(f"phase:{dt:.3f} {msg}")
+        return
 
     def _item_animation(self) -> int:
         try:

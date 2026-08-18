@@ -1,0 +1,125 @@
+QWidget {
+    background-color: #1e1e1e;
+    color: #e6e6e6;
+    font-family: "Segoe UI";
+    font-size: 13px;
+}
+QMainWindow, QDialog {
+    background-color: #1e1e1e;
+}
+QWidget#centralRoot, QWidget#leftPanel, QWidget#titleBar {
+    background-color: #252526;
+}
+QWidget#titleBar {
+    border-bottom: 1px solid #3a3a3a;
+}
+QLabel {
+    color: #e6e6e6;
+    background: transparent;
+}
+QLabel#titleLabel {
+    font-size: 20px;
+    font-weight: 700;
+}
+QLabel#sectionTitle {
+    font-size: 18px;
+    font-weight: 700;
+}
+QLabel#titleBarLabel {
+    font-size: 13px;
+    font-weight: 600;
+    background: transparent;
+}
+QTabWidget::pane {
+    border: 1px solid #3a3a3a;
+    background: #252526;
+    top: -1px;
+}
+QTabBar::tab {
+    background: #2d2d2d;
+    color: #e6e6e6;
+    padding: 8px 14px;
+    border: 1px solid #3a3a3a;
+    min-width: 80px;
+}
+QTabBar::tab:selected {
+    background: {accent};
+    color: #ffffff;
+}
+QLineEdit, QComboBox, QPlainTextEdit {
+    background: #2b2b2b;
+    color: #e6e6e6;
+    border: 1px solid #4a4a4a;
+    padding: 4px 8px;
+    selection-background-color: {accent};
+    selection-color: #ffffff;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+QComboBox QAbstractItemView {
+    background: #2b2b2b;
+    color: #e6e6e6;
+    selection-background-color: {accent};
+}
+QCheckBox {
+    color: #e6e6e6;
+    spacing: 8px;
+    background: transparent;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #6a6a6a;
+    background: #2b2b2b;
+}
+QCheckBox::indicator:checked {
+    background: {selected};
+    border: 1px solid {selected};
+}
+QScrollArea, QAbstractScrollArea {
+    border: none;
+    background: #2b2b2b;
+}
+QScrollBar:vertical {
+    background: #252526;
+    width: 10px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #555555;
+    min-height: 24px;
+}
+QScrollBar:horizontal {
+    background: #252526;
+    height: 10px;
+}
+QScrollBar::handle:horizontal {
+    background: #555555;
+    min-width: 24px;
+}
+QPushButton {
+    background-color: {accent};
+    color: #ffffff;
+    border: none;
+    padding: 8px 12px;
+}
+QPushButton:disabled {
+    background-color: #3a3a3a;
+    color: #888888;
+}
+QPushButton#titleBarMin, QPushButton#titleBarClose {
+    background: transparent;
+    color: #e6e6e6;
+    padding: 4px 10px;
+    min-width: 32px;
+}
+QPushButton#titleBarClose:hover {
+    background: #c42b1c;
+    color: #ffffff;
+}
+QPlainTextEdit#fishingLog {
+    background: #1a1a1a;
+    color: #e6e6e6;
+}
