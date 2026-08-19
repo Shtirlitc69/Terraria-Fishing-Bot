@@ -78,6 +78,26 @@ QCheckBox::indicator:checked {
     background: {selected};
     border: 1px solid {selected};
 }
+QRadioButton {
+    color: #e6e6e6;
+    spacing: 8px;
+    background: transparent;
+}
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #6a6a6a;
+    border-radius: 8px;
+    background: #2b2b2b;
+}
+QRadioButton::indicator:checked {
+    background: {selected};
+    border: 1px solid {selected};
+}
+QLabel#hintLabel {
+    color: #9a9a9a;
+    font-size: 12px;
+}
 QScrollArea, QAbstractScrollArea {
     border: none;
     background: #2b2b2b;

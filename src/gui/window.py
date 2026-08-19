@@ -297,7 +297,6 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.catch_tab.set_controls_enabled(False)
-        self.auto_drink.stop_event.clear()
 
         item_ids = ids_for_en_keys(en_keys, self.catches["by_en"])
         self.memory_bot = MemoryBot(
@@ -310,6 +309,7 @@ class MainWindow(QMainWindow):
             on_aim=self.bridge.on_aim,
             probe_enabled=bool(self.prefs.get("projectile_probe")),
             probe_log_path=str(probe_log_path()),
+            on_input_busy=self.auto_drink.set_suspended,
         )
         self.log_message(self.i18n.t("mem_looking") + "\n")
         self.log_message(self.i18n.t("hook_started") + "\n")
@@ -320,9 +320,6 @@ class MainWindow(QMainWindow):
         self.log_message("\n")
         self.save_switch_preferences()
         self.memory_bot.start()
-
-        if self.prefs.get("auto drink"):
-            self.auto_drink.start(key)
 
     def stop_clicked(self):
         self.start_button.setEnabled(True)
@@ -361,6 +358,7 @@ class MainWindow(QMainWindow):
         elif msg in ("hooked", "hooked_cached"):
             self.status_label.setText(self.i18n.t("mem_hooked"))
             self.log_message(self.i18n.t("mem_hooked") + "\n")
+            self._maybe_start_auto_drink()
         elif msg == "aim_prompt":
             self.status_label.setText(self.i18n.t("aim_button"))
             self.log_message(self.i18n.t("aim_prompt") + "\n")
@@ -388,6 +386,9 @@ class MainWindow(QMainWindow):
             self.log_message(self.i18n.t("mem_recast_failed") + "\n")
         elif msg == "focus_failed":
             self.log_message(self.i18n.t("mem_focus_failed") + "\n")
+        elif msg == "auto_drink_buffs_missing":
+            self.log_message(self.i18n.t("auto_drink_buffs_missing") + "\n")
+            self.auto_drink.stop()
         elif msg.startswith("safe_stop:"):
             reason = msg.split(":", 1)[1]
             reason_key = f"mem_safe_stop_reason_{reason}"
@@ -443,6 +444,7 @@ class MainWindow(QMainWindow):
 
     def save_switch_preferences(self):
         self.prefs["auto drink"] = self.settings_tab.auto_drink_on()
+        self.prefs["auto_drink_watch"] = self.settings_tab.auto_drink_watch()
         probe_on = self.settings_tab.probe_on()
         was_probe = bool(self.prefs.get("projectile_probe"))
         self.prefs["projectile_probe"] = probe_on
@@ -453,6 +455,30 @@ class MainWindow(QMainWindow):
             self.log_message(
                 self.i18n.t("projectile_probe_file", path=str(probe_log_path())) + "\n"
             )
+        self._maybe_start_auto_drink()
+
+    def _player_source(self):
+        bot = self.memory_bot
+        if bot is None:
+            return None, 0
+        return bot.process_handle, bot.local_player_ptr()
+
+    def _maybe_start_auto_drink(self):
+        if not self.prefs.get("auto drink"):
+            self.auto_drink.stop()
+            return
+        if self.memory_bot is None or not self.memory_bot.local_player_ptr():
+            return
+        watch = self.settings_tab.auto_drink_watch()
+        if self.auto_drink.running():
+            self.auto_drink.set_watch(watch)
+            return
+        self.auto_drink.start(
+            self.settings_tab.quick_buff_key(),
+            self._player_source,
+            watch=watch,
+            on_status=self.bridge.on_status,
+        )
 
     def closeEvent(self, event):
         self.store_geometry_to_prefs()

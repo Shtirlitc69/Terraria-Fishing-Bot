@@ -25,6 +25,7 @@ a = Analysis(
         'i18n',
         'catches_data',
         'memory_bot',
+        'player_buffs',
         'projectile_probe',
         'pymem',
         'gui',

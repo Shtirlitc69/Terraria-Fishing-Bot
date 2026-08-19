@@ -1,14 +1,21 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QLabel,
     QLineEdit,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
 
-from gui.prefs import normalize_quick_buff_key
+from gui.prefs import (
+    WATCH_ALL,
+    WATCH_CRATE,
+    normalize_auto_drink_watch,
+    normalize_quick_buff_key,
+)
 from gui.theme import ACCENTS
 
 _ACCENT_LABELS = ("Blue", "Dark-blue", "Green")
@@ -45,7 +52,25 @@ class SettingsTab(QWidget):
         self._window.currentIndexChanged.connect(self._on_window_mode)
 
         self._auto_drink = QCheckBox(self._i18n.t("auto_drink"), self)
-        self._auto_drink.toggled.connect(self._on_switch)
+        self._auto_drink.toggled.connect(self._on_auto_drink)
+
+        self._drink_panel = QWidget(self)
+        drink_layout = QVBoxLayout(self._drink_panel)
+        drink_layout.setContentsMargins(18, 4, 0, 4)
+        drink_layout.setSpacing(4)
+        self._watch_all = QRadioButton(self._i18n.t("auto_drink_watch_all"), self)
+        self._watch_crate = QRadioButton(self._i18n.t("auto_drink_watch_crate"), self)
+        self._watch_hint = QLabel(self._i18n.t("auto_drink_watch_hint"), self)
+        self._watch_hint.setWordWrap(True)
+        self._watch_hint.setObjectName("hintLabel")
+        self._watch_group = QButtonGroup(self)
+        self._watch_group.addButton(self._watch_all)
+        self._watch_group.addButton(self._watch_crate)
+        self._watch_all.toggled.connect(self._on_watch)
+        self._watch_crate.toggled.connect(self._on_watch)
+        drink_layout.addWidget(self._watch_all)
+        drink_layout.addWidget(self._watch_crate)
+        drink_layout.addWidget(self._watch_hint)
 
         self._probe = QCheckBox(self._i18n.t("projectile_probe"), self)
         self._probe.toggled.connect(self._on_switch)
@@ -71,6 +96,7 @@ class SettingsTab(QWidget):
         layout.addWidget(self._window, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addSpacing(12)
         layout.addWidget(self._auto_drink)
+        layout.addWidget(self._drink_panel)
         layout.addSpacing(8)
         layout.addWidget(self._probe)
         layout.addSpacing(12)
@@ -120,6 +146,10 @@ class SettingsTab(QWidget):
             mode = "normal"
         self._set_combo_data(self._window, mode)
         self._auto_drink.setChecked(bool(self._prefs.get("auto drink")))
+        watch = normalize_auto_drink_watch(self._prefs.get("auto_drink_watch"))
+        self._watch_all.setChecked(watch != WATCH_CRATE)
+        self._watch_crate.setChecked(watch == WATCH_CRATE)
+        self._drink_panel.setVisible(self._auto_drink.isChecked())
         self._probe.setChecked(bool(self._prefs.get("projectile_probe")))
         self._buff.setText(self._prefs.get("quick_buff_key", "b"))
         self._filling = False
@@ -129,6 +159,9 @@ class SettingsTab(QWidget):
         self._theme_label.setText(self._i18n.t("color_theme"))
         self._window_label.setText(self._i18n.t("window_mode"))
         self._auto_drink.setText(self._i18n.t("auto_drink"))
+        self._watch_all.setText(self._i18n.t("auto_drink_watch_all"))
+        self._watch_crate.setText(self._i18n.t("auto_drink_watch_crate"))
+        self._watch_hint.setText(self._i18n.t("auto_drink_watch_hint"))
         self._probe.setText(self._i18n.t("projectile_probe"))
         self._buff_label.setText(self._i18n.t("quick_buff_key"))
         current_lang = self._language.currentData()
@@ -144,6 +177,11 @@ class SettingsTab(QWidget):
 
     def auto_drink_on(self):
         return self._auto_drink.isChecked()
+
+    def auto_drink_watch(self):
+        watch = WATCH_CRATE if self._watch_crate.isChecked() else WATCH_ALL
+        self._prefs["auto_drink_watch"] = watch
+        return watch
 
     def probe_on(self):
         return self._probe.isChecked()
@@ -195,6 +233,18 @@ class SettingsTab(QWidget):
     def _on_switch(self, _checked=False):
         if self._filling:
             return
+        self.switches_changed.emit()
+
+    def _on_auto_drink(self, _checked=False):
+        if self._filling:
+            return
+        self._drink_panel.setVisible(self._auto_drink.isChecked())
+        self.switches_changed.emit()
+
+    def _on_watch(self, _checked=False):
+        if self._filling or not _checked:
+            return
+        self.auto_drink_watch()
         self.switches_changed.emit()
 
     def _on_buff_finished(self):

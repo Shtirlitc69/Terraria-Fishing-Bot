@@ -130,6 +130,7 @@
         "Zombie Fish"
     ],
     "auto drink": false,
+    "auto_drink_watch": "all",
     "Color Theme": "blue",
     "quick_buff_key": "b",
     "language": "ru",

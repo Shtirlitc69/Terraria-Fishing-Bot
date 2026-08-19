@@ -119,12 +119,15 @@ REEL_MAX_CLICKS = 3
 CATCH_DELAY_S = 0.25
 RECAST_INTERVAL_S = 1.0
 RECAST_SETTLE_S = 1.0
-RECAST_ANIM_TIMEOUT_S = 2.0
+RECAST_ANIM_TIMEOUT_S = 5.0
 RECAST_HOLD_S = 0.016
 RECAST_HOLD_MAX_S = 0.250
 RECAST_STABLE_S = 0.160
 RECAST_OLD_BOBBER_WAIT_S = 0.5
 RECAST_POLL_S = 0.002
+RECAST_MAX_CLICKS = 3
+RECAST_RETRY_PAUSE_S = 0.35
+BOBBER_WAIT_S = 0.4
 USE_ITEM_PULSE_S = 0.002
 INPUT_MOUSE = 0
 ULONG_PTR = ctypes.c_size_t
@@ -392,10 +395,12 @@ class MemoryBot:
         on_aim=None,
         probe_enabled=False,
         probe_log_path=None,
+        on_input_busy=None,
     ):
         self.on_catch = on_catch
         self.on_status = on_status
         self.on_error = on_error
+        self.on_input_busy = on_input_busy
         self.whitelist_ids = set(whitelist_ids or [])
         self.poll_interval = poll_interval
         self.aim_client = _parse_aim(aim_client)
@@ -435,6 +440,7 @@ class MemoryBot:
     def stop(self):
         self.stop_event.set()
         self._need_aim.set()
+        self._set_input_busy(False)
         if self.thread:
             self.thread.join(timeout=15.0)
             self.thread = None
@@ -527,35 +533,37 @@ class MemoryBot:
                 if not allow:
                     self.on_status(f"bite:{item_id}:skip")
                 if allow:
-                    self._phase(f"reel_begin id={item_id}")
-                    if not self._reel_until_started():
-                        self.on_status("reel_failed")
-                        self._phase("reel_failed keep last")
-                        time.sleep(self.poll_interval)
-                        continue
-                    self._phase("reel_ok wait_anim")
-                    self._wait_animation_clear()
-                    if self.stop_event.is_set():
-                        break
-                    self._phase(
-                        f"pause_before_recast "
-                        f"catch={CATCH_DELAY_S}s interval={RECAST_INTERVAL_S}s"
-                    )
-                    self._sleep_interruptible(CATCH_DELAY_S)
-                    self._sleep_interruptible(RECAST_INTERVAL_S)
-                    self._phase("zero_rolled last=0")
-                    self._zero_rolled()
-                    last_fish_id = 0
-                    self.on_catch(item_id)
-                    if not self._wait_animation_clear(RECAST_ANIM_TIMEOUT_S):
-                        anim = self._item_animation()
-                        self._phase(f"recast_skip anim={anim} timeout")
-                        time.sleep(self.poll_interval)
-                        continue
-                    self._phase("recast_click")
-                    if not self._recast_click():
-                        break
-                    self._phase(f"back_to_loop last={last_fish_id}")
+                    self._set_input_busy(True)
+                    try:
+                        self._phase(f"reel_begin id={item_id}")
+                        if not self._reel_until_started():
+                            self.on_status("reel_failed")
+                            self._phase("reel_failed keep last")
+                            time.sleep(self.poll_interval)
+                            continue
+                        self._phase("reel_ok wait_anim")
+                        self._wait_animation_clear()
+                        if self.stop_event.is_set():
+                            break
+                        self._phase(
+                            f"pause_before_recast "
+                            f"catch={CATCH_DELAY_S}s interval={RECAST_INTERVAL_S}s"
+                        )
+                        self._sleep_interruptible(CATCH_DELAY_S)
+                        self._sleep_interruptible(RECAST_INTERVAL_S)
+                        self._phase("zero_rolled last=0")
+                        self._zero_rolled()
+                        last_fish_id = 0
+                        self.on_catch(item_id)
+                        self._wait_animation_clear(RECAST_ANIM_TIMEOUT_S)
+                        if self.stop_event.is_set():
+                            break
+                        self._phase("recast_click")
+                        if not self._recast_until_bobber():
+                            break
+                        self._phase(f"back_to_loop last={last_fish_id}")
+                    finally:
+                        self._set_input_busy(False)
                 time.sleep(self.poll_interval)
         finally:
             self._close_handles()
@@ -1153,6 +1161,16 @@ class MemoryBot:
             idx = 0
         return self._read_u32(arr + 8 + idx * 4)
 
+    def local_player_ptr(self) -> int:
+        """Read-only pointer to the local Player. 0 if the hook is not ready."""
+        if not self.process_handle or not self._player_static:
+            return 0
+        try:
+            ptr = self._local_player()
+        except RuntimeError:
+            return 0
+        return int(ptr) if ptr else 0
+
     def _my_player_id(self) -> int:
         idx = 0
         if self._myplayer_static:
@@ -1535,6 +1553,60 @@ class MemoryBot:
             or self._animation_rose(before, anim_end)
         )
         return rose
+
+    def _set_input_busy(self, busy: bool):
+        cb = self.on_input_busy
+        if cb is None:
+            return
+        try:
+            cb(bool(busy))
+        except Exception:
+            pass
+
+    def _local_bobbers(self):
+        """Local bobbers, or None if Main.projectile cannot be read."""
+        if not self._ensure_projectile_array():
+            return None
+        try:
+            return self._list_bobbers()
+        except RuntimeError:
+            return None
+
+    def _wait_for_bobber(self, timeout_s: float) -> Optional[bool]:
+        """True if a local bobber appears. False if none. None if unverifiable."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and not self.stop_event.is_set():
+            found = self._local_bobbers()
+            if found is None:
+                return None
+            if found:
+                return True
+            time.sleep(0.05)
+        found = self._local_bobbers()
+        if found is None:
+            return None
+        return bool(found)
+
+    def _recast_until_bobber(self) -> bool:
+        """Atomic recast clicks until a local bobber exists, or clicks are exhausted."""
+        can_verify = self._ensure_projectile_array()
+        for attempt in range(RECAST_MAX_CLICKS):
+            if self.stop_event.is_set():
+                return False
+            if not self._recast_click():
+                return False
+            if not can_verify:
+                return True
+            appeared = self._wait_for_bobber(BOBBER_WAIT_S)
+            if appeared is None:
+                return True
+            if appeared:
+                return True
+            if attempt + 1 < RECAST_MAX_CLICKS:
+                self.on_status("recast_failed")
+                self._sleep_interruptible(RECAST_RETRY_PAUSE_S)
+        self.on_status("recast_failed")
+        return True
 
     def _recast_click(self) -> bool:
         """One-shot cast: one releaseUseItem edge and an atomic LMB click.

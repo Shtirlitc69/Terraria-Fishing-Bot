@@ -44,6 +44,10 @@ QCheckBox {
     color: #e6e6e6;
     spacing: 8px;
 }
+QRadioButton {
+    color: #e6e6e6;
+    spacing: 8px;
+}
 QScrollArea {
     border: none;
     background: #2b2b2b;

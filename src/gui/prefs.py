@@ -1,9 +1,14 @@
 import json
 import re
 
+WATCH_ALL = "all"
+WATCH_CRATE = "crate"
+AUTO_DRINK_WATCH_MODES = (WATCH_ALL, WATCH_CRATE)
+
 DEFAULT_PREFERENCES = {
     "Catch List": [],
     "auto drink": False,
+    "auto_drink_watch": WATCH_ALL,
     "Color Theme": "blue",
     "quick_buff_key": "b",
     "language": "ru",
@@ -46,6 +51,13 @@ def normalize_quick_buff_key(key):
     return "b"
 
 
+def normalize_auto_drink_watch(value):
+    key = str(value or "").strip().lower()
+    if key in AUTO_DRINK_WATCH_MODES:
+        return key
+    return WATCH_ALL
+
+
 def _parse_offset(raw):
     if raw.startswith("+"):
         return int(raw[1:] or "0")
@@ -78,6 +90,9 @@ def load_preferences(path):
     for key in _STALE_KEYS:
         prefs.pop(key, None)
     prefs["quick_buff_key"] = normalize_quick_buff_key(prefs["quick_buff_key"])
+    prefs["auto_drink_watch"] = normalize_auto_drink_watch(
+        prefs.get("auto_drink_watch")
+    )
     prefs["cast_aim"] = normalize_cast_aim(prefs.get("cast_aim"))
     if prefs.get("language") not in ("en", "ru"):
         prefs["language"] = "en"
