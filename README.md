@@ -12,9 +12,9 @@ Use the default **32-bit Steam** build. Do not add `-autoarch` (that starts 64-b
 
 ## Warning
 
-Multiplayer use may violate the game ToS. Prefer single-player / offline.
+If FPS is unstable, a recast may fail because clicks are bound to the mouse.
 
-If an older version of this project patched `Terraria.exe`, restore the original with Steam **Verify integrity of game files**. This bot will not patch or restore the game.
+The game cannot run in the background: a click always brings Terraria back as the active application. There is no adequate alternative for running the game in the background with the bot.
 
 ## Download / Run
 
