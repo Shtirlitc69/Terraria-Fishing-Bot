@@ -127,7 +127,7 @@ RECAST_OLD_BOBBER_WAIT_S = 0.5
 RECAST_POLL_S = 0.002
 RECAST_MAX_CLICKS = 3
 RECAST_RETRY_PAUSE_S = 0.35
-BOBBER_WAIT_S = 0.4
+BOBBER_WAIT_S = 1.0
 USE_ITEM_PULSE_S = 0.002
 INPUT_MOUSE = 0
 ULONG_PTR = ctypes.c_size_t
@@ -1593,6 +1593,10 @@ class MemoryBot:
         for attempt in range(RECAST_MAX_CLICKS):
             if self.stop_event.is_set():
                 return False
+            if can_verify:
+                found = self._local_bobbers()
+                if found:
+                    return True
             if not self._recast_click():
                 return False
             if not can_verify:
@@ -1605,6 +1609,10 @@ class MemoryBot:
             if attempt + 1 < RECAST_MAX_CLICKS:
                 self.on_status("recast_failed")
                 self._sleep_interruptible(RECAST_RETRY_PAUSE_S)
+        if can_verify:
+            found = self._local_bobbers()
+            if found:
+                return True
         self.on_status("recast_failed")
         return True
 

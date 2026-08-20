@@ -2,7 +2,7 @@
 
 # Terraria Fishing Bot
 
-Memory-based fishing helper for Terraria **1.4.5.6** on Windows. It reads the live `Terraria.exe` process and left-clicks at a saved cast point when a whitelisted bite appears. **It does not patch the game.**
+Memory-based fishing helper for Terraria **1.4.5.7** on Windows. It reads the live `Terraria.exe` process and left-clicks at a saved cast point when a whitelisted bite appears. **It does not patch the game.**
 
 Use the default **32-bit Steam** build. Do not add `-autoarch` (that starts 64-bit Terraria; the bot will refuse to attach).
 
@@ -12,7 +12,7 @@ Use the default **32-bit Steam** build. Do not add `-autoarch` (that starts 64-b
 
 ## Warning
 
-If FPS is unstable, a recast may fail because clicks are bound to the mouse.
+If FPS dips, a recast click can miss a frame. The bot waits about a second for the bobber and will not click again if one is already out.
 
 The game cannot run in the background: a click always brings Terraria back as the active application. There is no adequate alternative for running the game in the background with the bot.
 
