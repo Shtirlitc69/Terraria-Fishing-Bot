@@ -3,71 +3,75 @@ from pathlib import Path
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
+# Design tokens (Refactoring UI grey scale / M3 surface roles).
+# Single source of truth: widgets and QSS must not hardcode hex values.
+GREYS = {
+    "grey-900": "#17191c",
+    "grey-800": "#1b1d21",
+    "grey-700": "#22252a",
+    "grey-600": "#282c33",
+    "grey-500": "#33373e",
+    "grey-400": "#4a4f58",
+    "grey-300": "#6e747d",
+    "grey-200": "#9aa0a6",
+    "grey-100": "#c8ccd1",
+    "grey-50": "#e8eaed",
+}
+
 ACCENTS = {
     "blue": "#3b8ed0",
     "dark-blue": "#1f538d",
     "green": "#2cc985",
 }
 
+SELECTED = "#3dd68c"
+
+TOKENS = {
+    **GREYS,
+    # M3-like tonal roles: depth comes from surface tone, not from borders.
+    "surface": GREYS["grey-800"],
+    "panel": GREYS["grey-700"],
+    "field": GREYS["grey-600"],
+    "on_surface": GREYS["grey-50"],
+    "on_surface_variant": GREYS["grey-200"],
+    "outline": GREYS["grey-400"],
+    "outline_variant": GREYS["grey-500"],
+    "disabled_bg": GREYS["grey-500"],
+    "disabled_fg": GREYS["grey-300"],
+    "selected": SELECTED,
+    "radius_s": "4px",
+    "radius_m": "6px",
+}
+
 _FALLBACK_QSS = """
 QWidget {
-    background-color: #1e1e1e;
-    color: #e6e6e6;
+    background-color: {surface};
+    color: {on_surface};
     font-family: "Segoe UI";
     font-size: 13px;
-}
-QMainWindow, QDialog {
-    background-color: #1e1e1e;
-}
-QTabWidget::pane {
-    border: 1px solid #3a3a3a;
-    background: #252526;
-}
-QTabBar::tab {
-    background: #2d2d2d;
-    color: #e6e6e6;
-    padding: 8px 14px;
-    border: 1px solid #3a3a3a;
-}
-QTabBar::tab:selected {
-    background: {accent};
-    color: #ffffff;
-}
-QLineEdit, QPlainTextEdit, QComboBox {
-    background: #2b2b2b;
-    color: #e6e6e6;
-    border: 1px solid #3a3a3a;
-    padding: 4px 8px;
-    selection-background-color: {accent};
-}
-QCheckBox {
-    color: #e6e6e6;
-    spacing: 8px;
-}
-QRadioButton {
-    color: #e6e6e6;
-    spacing: 8px;
-}
-QScrollArea {
-    border: none;
-    background: #2b2b2b;
 }
 QPushButton {
     background-color: {accent};
     color: #ffffff;
     border: none;
-    padding: 8px 12px;
-}
-QLabel#titleBarLabel {
-    color: #e6e6e6;
-    font-size: 13px;
-    font-weight: 600;
+    border-radius: {radius_m};
 }
 """
 
 
 def accent_hex(key: str) -> str:
     return ACCENTS.get(str(key).lower(), ACCENTS["blue"])
+
+
+def on_accent_hex(hex_color: str) -> str:
+    """Pick black or white text for WCAG-ish contrast on an accent."""
+    color = QColor(hex_color)
+    if not color.isValid():
+        return "#ffffff"
+    luminance = (
+        0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue()
+    ) / 255.0
+    return "#1b1d21" if luminance > 0.62 else "#ffffff"
 
 
 def _shift(hex_color: str, lighter: int) -> str:
@@ -93,13 +97,24 @@ def load_qss_template() -> str:
 
 def qss_for(accent_key: str) -> str:
     accent = accent_hex(accent_key)
+    values = {
+        **TOKENS,
+        "accent": accent,
+        # M3 state layers, resolved once per theme switch instead of per frame.
+        "accent_hover": _shift(accent, 118),
+        "accent_pressed": _shift(accent, 82),
+        "hover_layer": "rgba(255, 255, 255, 14)",
+        "pressed_layer": "rgba(255, 255, 255, 26)",
+        "focus_ring": f"1px solid {_shift(accent, 130)}",
+        "selection_bg": _shift(accent, 140),
+        "on_accent": on_accent_hex(accent),
+        "icons_dir": (Path(__file__).resolve().parent / "styles").as_posix(),
+    }
     template = load_qss_template()
-    return (
-        template.replace("{accent_hover}", _shift(accent, 120))
-        .replace("{accent_pressed}", _shift(accent, 80))
-        .replace("{accent}", accent)
-        .replace("{selected}", "#3dd68c")
-    )
+    qss = template
+    for key, value in values.items():
+        qss = qss.replace("{" + key + "}", value)
+    return qss
 
 
 def apply_theme(app: QApplication, accent_key: str):

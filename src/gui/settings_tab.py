@@ -56,7 +56,7 @@ class SettingsTab(QWidget):
 
         self._drink_panel = QWidget(self)
         drink_layout = QVBoxLayout(self._drink_panel)
-        drink_layout.setContentsMargins(18, 4, 0, 4)
+        drink_layout.setContentsMargins(24, 4, 0, 4)
         drink_layout.setSpacing(4)
         self._watch_all = QRadioButton(self._i18n.t("auto_drink_watch_all"), self)
         self._watch_crate = QRadioButton(self._i18n.t("auto_drink_watch_crate"), self)
@@ -83,8 +83,8 @@ class SettingsTab(QWidget):
         self._buff.returnPressed.connect(self._on_buff_finished)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 16, 12, 16)
-        layout.setSpacing(6)
+        layout.setContentsMargins(16, 12, 16, 16)
+        layout.setSpacing(8)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self._language_label)
         layout.addWidget(self._language, 0, Qt.AlignmentFlag.AlignLeft)

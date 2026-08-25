@@ -11,10 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from catches_data import catch_display_name
-from gui.widgets import AnimatedButton
-
-SELECTED_COLOR = "#3dd68c"
-UNSELECTED_COLOR = "#e6e6e6"
+from gui.widgets import SecondaryButton
 
 
 class CatchTab(QWidget):
@@ -48,9 +45,9 @@ class CatchTab(QWidget):
         preset_layout = QHBoxLayout(preset_row)
         preset_layout.setContentsMargins(0, 0, 0, 0)
         preset_layout.setSpacing(8)
-        self._preset_fish = AnimatedButton(self._i18n.t("preset_fish"), preset_row)
-        self._preset_quest = AnimatedButton(self._i18n.t("preset_quest"), preset_row)
-        self._preset_crates = AnimatedButton(self._i18n.t("preset_crates"), preset_row)
+        self._preset_fish = SecondaryButton(self._i18n.t("preset_fish"), preset_row)
+        self._preset_quest = SecondaryButton(self._i18n.t("preset_quest"), preset_row)
+        self._preset_crates = SecondaryButton(self._i18n.t("preset_crates"), preset_row)
         self._preset_fish.clicked.connect(lambda: self._select_preset("Fish"))
         self._preset_quest.clicked.connect(lambda: self._select_preset("Quest Fish"))
         self._preset_crates.clicked.connect(lambda: self._select_preset("Crates"))
@@ -61,7 +58,7 @@ class CatchTab(QWidget):
         self._list_host = QWidget()
         self._list_layout = QVBoxLayout(self._list_host)
         self._list_layout.setContentsMargins(4, 4, 4, 4)
-        self._list_layout.setSpacing(1)
+        self._list_layout.setSpacing(2)
         self._list_layout.addStretch(1)
 
         self._scroll = QScrollArea(self)
@@ -73,15 +70,16 @@ class CatchTab(QWidget):
         actions_layout = QHBoxLayout(actions)
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setSpacing(8)
-        self._clear = AnimatedButton(self._i18n.t("clear"), actions)
-        self._select_all = AnimatedButton(self._i18n.t("select_all"), actions)
+        self._clear = SecondaryButton(self._i18n.t("clear"), actions)
+        self._select_all = SecondaryButton(self._i18n.t("select_all"), actions)
         self._clear.clicked.connect(self.clear_clicked)
         self._select_all.clicked.connect(self._on_select_all)
         actions_layout.addWidget(self._clear)
         actions_layout.addWidget(self._select_all)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 10)
+        layout.setContentsMargins(16, 12, 16, 16)
+        layout.setSpacing(8)
         layout.addWidget(self._title)
         layout.addWidget(self._search)
         layout.addWidget(preset_row)
@@ -89,16 +87,6 @@ class CatchTab(QWidget):
         layout.addWidget(actions)
 
         self._build_catch_checkboxes()
-
-    def set_accent(self, hex_color: str):
-        for btn in (
-            self._preset_fish,
-            self._preset_quest,
-            self._preset_crates,
-            self._clear,
-            self._select_all,
-        ):
-            btn.set_accent(hex_color)
 
     def retranslate(self):
         self._title.setText(self._i18n.t("catch_list"))
@@ -131,12 +119,12 @@ class CatchTab(QWidget):
             for en_key in self._catch_names:
                 check = QCheckBox(self.display_name_for_en(en_key), self._list_host)
                 check.setChecked(en_key in selected)
+                self._mark_selected(check)
                 check.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 check.toggled.connect(lambda _checked, k=en_key: self._on_toggled(k))
                 self._list_layout.addWidget(check)
                 self._checks[en_key] = check
                 self._visible[en_key] = True
-                self._style_row(en_key)
         finally:
             self._suspend = False
         if stretch is not None:
@@ -164,15 +152,21 @@ class CatchTab(QWidget):
         self._save_prefs()
         self.selection_changed.emit()
 
-    def _style_row(self, en_key):
-        check = self._checks.get(en_key)
-        if check is None:
-            return
-        color = SELECTED_COLOR if check.isChecked() else UNSELECTED_COLOR
-        check.setStyleSheet(f"QCheckBox {{ color: {color}; background: transparent; }}")
+    @staticmethod
+    def _mark_selected(check):
+        # Color for the checked row comes from one QSS rule
+        # (QCheckBox[selected="true"]) instead of per-row inline styles.
+        selected = check.isChecked()
+        if check.property("selected") != selected:
+            check.setProperty("selected", selected)
+            style = check.style()
+            style.unpolish(check)
+            style.polish(check)
 
     def _on_toggled(self, en_key):
-        self._style_row(en_key)
+        check = self._checks.get(en_key)
+        if check is not None:
+            self._mark_selected(check)
         if self._suspend:
             return
         self._prefs["Catch List"] = self.get_selected_en_keys()
@@ -192,7 +186,7 @@ class CatchTab(QWidget):
     def refresh_labels(self):
         for en_key, check in self._checks.items():
             check.setText(self.display_name_for_en(en_key))
-            self._style_row(en_key)
+            self._mark_selected(check)
         self._apply_filter()
 
     def set_selected_en_keys(self, en_keys):
@@ -201,7 +195,7 @@ class CatchTab(QWidget):
         try:
             for en_key, check in self._checks.items():
                 check.setChecked(en_key in selected)
-                self._style_row(en_key)
+                self._mark_selected(check)
         finally:
             self._suspend = False
 

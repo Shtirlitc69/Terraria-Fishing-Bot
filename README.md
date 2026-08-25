@@ -2,7 +2,7 @@
 
 # Terraria Fishing Bot
 
-Memory-based fishing helper for Terraria **1.4.5.7** on Windows. It reads the live `Terraria.exe` process and left-clicks at a saved cast point when a whitelisted bite appears. **It does not patch the game.**
+Memory-based fishing helper for Terraria **1.4.5.8** on Windows. It reads the live `Terraria.exe` process and left-clicks at a saved cast point when a whitelisted bite appears. **It does not patch the game.**
 
 Use the default **32-bit Steam** build. Do not add `-autoarch` (that starts 64-bit Terraria; the bot will refuse to attach).
 

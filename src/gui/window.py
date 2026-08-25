@@ -3,6 +3,7 @@ import json
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -25,7 +26,7 @@ from gui.prefs import (
 )
 from gui.settings_tab import SettingsTab
 from gui.stats_tab import StatsTab
-from gui.theme import accent_hex, apply_theme
+from gui.theme import apply_theme
 from gui.widgets import AnimatedButton, FishingLog, TitleBar
 from memory_bot import MemoryBot
 
@@ -61,7 +62,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.catch_tab.set_selected_en_keys(self.prefs.get("Catch List", []))
         self.log_view.append_log(f"{self.i18n.t('fishing_log')}\n\n")
-        self.apply_accent(self.prefs.get("Color Theme", "blue"))
+        apply_theme(QApplication.instance(), self.prefs.get("Color Theme", "blue"))
         self.restore_geometry_from_prefs()
         self.apply_window_mode(self.prefs.get("window_mode", "normal"))
         self.retranslate()
@@ -82,16 +83,16 @@ class MainWindow(QMainWindow):
 
         body = QWidget(root)
         body_layout = QHBoxLayout(body)
-        body_layout.setContentsMargins(0, 0, 16, 16)
-        body_layout.setSpacing(0)
+        body_layout.setContentsMargins(16, 16, 16, 16)
+        body_layout.setSpacing(12)
 
         left = QWidget(body)
         left.setObjectName("leftPanel")
         left.setMinimumWidth(260)
         left.setMaximumWidth(360)
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(16, 16, 12, 16)
-        left_layout.setSpacing(6)
+        left_layout.setContentsMargins(0, 0, 4, 0)
+        left_layout.setSpacing(8)
 
         self.title_label = QLabel(self.i18n.t("app_title"), left)
         self.title_label.setObjectName("titleLabel")
@@ -105,6 +106,7 @@ class MainWindow(QMainWindow):
         self.aim_button.clicked.connect(self.aim_clicked)
 
         self.status_label = QLabel(self.i18n.t("status_idle"), left)
+        self.status_label.setObjectName("statusPill")
         self.status_label.setWordWrap(True)
 
         self.log_view = FishingLog(self.i18n, left)
@@ -183,18 +185,7 @@ class MainWindow(QMainWindow):
         self.log_view.append_log(text)
 
     def apply_accent(self, key):
-        hex_color = accent_hex(key)
-        from PySide6.QtWidgets import QApplication
-
         apply_theme(QApplication.instance(), key)
-        for btn in (
-            self.start_button,
-            self.stop_button,
-            self.aim_button,
-            self.copy_log_button,
-        ):
-            btn.set_accent(hex_color)
-        self.catch_tab.set_accent(hex_color)
 
     def apply_window_mode(self, mode):
         if mode not in ("normal", "frameless", "fullscreen"):
