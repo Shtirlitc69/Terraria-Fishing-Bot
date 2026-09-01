@@ -5,16 +5,17 @@ Set-Location $Root
 
 $BackupDir = Join-Path $Root ".build_backup"
 $ReleaseDir = Join-Path $Root "release"
+$DistDir = Join-Path $Root ".build_dist"
 $PrefsBackup = Join-Path $BackupDir "preferences.json"
 $StatsBackup = Join-Path $BackupDir "statistics.json"
 
 if (Test-Path (Join-Path $ReleaseDir "preferences.json")) {
     New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
-    Copy-Item (Join-Path $ReleaseDir "preferences.json") $PrefsBackup -Force
+    Move-Item (Join-Path $ReleaseDir "preferences.json") $PrefsBackup -Force
 }
 if (Test-Path (Join-Path $ReleaseDir "statistics.json")) {
     New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
-    Copy-Item (Join-Path $ReleaseDir "statistics.json") $StatsBackup -Force
+    Move-Item (Join-Path $ReleaseDir "statistics.json") $StatsBackup -Force
 }
 
 function Assert-ReleaseUnlocked {
@@ -61,11 +62,9 @@ function Test-QtBundle([string]$internalDir) {
 }
 
 function Install-ReleaseBundle {
-    $outputDir = Join-Path $ReleaseDir "Fishing bot"
+    $outputDir = Join-Path $DistDir "Fishing bot"
     $srcExe = Join-Path $outputDir "Fishing bot.exe"
     $srcInternal = Join-Path $outputDir "_internal"
-    $destExe = Join-Path $ReleaseDir "Fishing bot.exe"
-    $destInternal = Join-Path $ReleaseDir "_internal"
 
     if (-not (Test-Path $srcExe) -or -not (Test-Path $srcInternal)) {
         throw "Build failed: PyInstaller output missing in $outputDir"
@@ -74,18 +73,15 @@ function Install-ReleaseBundle {
 
     Assert-ReleaseUnlocked
 
-    $stagingInternal = Join-Path $ReleaseDir "_internal.new"
-    $stagingExe = Join-Path $ReleaseDir "Fishing bot.exe.new"
-    $oldInternal = Join-Path $ReleaseDir "_internal.old"
+    $stagingDir = Join-Path $DistDir "staging"
+    $stagingInternal = Join-Path $stagingDir "_internal.new"
+    $stagingExe = Join-Path $stagingDir "Fishing bot.exe.new"
+    $destExe = Join-Path $ReleaseDir "Fishing bot.exe"
+    $destInternal = Join-Path $ReleaseDir "_internal"
+    $oldInternal = Join-Path $stagingDir "_internal.old"
 
-    Get-ChildItem -LiteralPath $ReleaseDir -Force -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Name -eq "_internal.new" -or
-            $_.Name -eq "_internal.old" -or
-            $_.Name -like "_internal_old*" -or
-            $_.Name -like "*.exe.old" -or
-            $_.Name -eq "Fishing bot.exe.new"
-        } |
+    New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+    Get-ChildItem -LiteralPath $stagingDir -Force -ErrorAction SilentlyContinue |
         ForEach-Object {
             Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -98,27 +94,25 @@ function Install-ReleaseBundle {
     if (Test-Path $destInternal) {
         try {
             Rename-Item -LiteralPath $destInternal -NewName "_internal.old"
+            Move-Item (Join-Path $ReleaseDir "_internal.old") $oldInternal -Force
         } catch {
             throw "Закрой Fishing bot.exe и повтори сборку."
         }
     }
     try {
-        Rename-Item -LiteralPath $stagingInternal -NewName "_internal"
+        Move-Item -LiteralPath $stagingInternal -Destination $destInternal
     } catch {
         if (Test-Path $oldInternal) {
-            Rename-Item -LiteralPath $oldInternal -NewName "_internal" -ErrorAction SilentlyContinue
+            Move-Item $oldInternal $destInternal -Force -ErrorAction SilentlyContinue
         }
         throw "Закрой Fishing bot.exe и повтори сборку."
     }
 
-    if (Test-Path $destExe) {
-        try {
-            Remove-Item -LiteralPath $destExe -Force
-        } catch {
-            throw "Закрой Fishing bot.exe и повтори сборку."
-        }
+    try {
+        Move-Item -LiteralPath $stagingExe -Destination $destExe -Force
+    } catch {
+        throw "Закрой Fishing bot.exe и повтори сборку."
     }
-    Rename-Item -LiteralPath $stagingExe -NewName "Fishing bot.exe"
 
     if (Test-Path $oldInternal) {
         Remove-Item $oldInternal -Recurse -Force -ErrorAction SilentlyContinue
@@ -131,16 +125,10 @@ function Install-ReleaseBundle {
 }
 
 pip install -r requirements.txt
-pyinstaller --noconfirm --clean --distpath release --workpath .pyinstaller_build "Fishing bot.spec"
+New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
+pyinstaller --noconfirm --clean --distpath $DistDir --workpath .pyinstaller_build "Fishing bot.spec"
 
 Install-ReleaseBundle
-
-if (Test-Path $PrefsBackup) {
-    Copy-Item $PrefsBackup (Join-Path $ReleaseDir "preferences.json") -Force
-}
-if (Test-Path $StatsBackup) {
-    Copy-Item $StatsBackup (Join-Path $ReleaseDir "statistics.json") -Force
-}
 
 $ExePath = Join-Path $ReleaseDir "Fishing bot.exe"
 if (-not (Test-Path $ExePath)) {
@@ -151,6 +139,9 @@ Test-QtBundle (Join-Path $ReleaseDir "_internal")
 $WorkPath = Join-Path $Root ".pyinstaller_build"
 if (Test-Path $WorkPath) {
     Remove-Item $WorkPath -Recurse -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path $DistDir) {
+    Remove-Item $DistDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "Build complete:"

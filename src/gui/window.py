@@ -1,4 +1,6 @@
 import json
+from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
@@ -17,7 +19,14 @@ from catches_data import catch_display_name, ids_for_en_keys
 from gui.auto_drink import AutoDrink
 from gui.bridge import BotBridge
 from gui.catch_tab import CatchTab
-from gui.paths import probe_log_path, resource_path
+from gui.paths import (
+    debug_log_path,
+    events_log_path,
+    fishing_log_path,
+    layout_cache_path,
+    probe_log_path,
+    resource_path,
+)
 from gui.prefs import (
     format_window_geometry,
     normalize_cast_aim,
@@ -61,7 +70,10 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(_MIN_W, _MIN_H)
         self._build_ui()
         self.catch_tab.set_selected_en_keys(self.prefs.get("Catch List", []))
+        # Header goes to the widget only: the file mirror is enabled after
+        # it, so fishing_log.txt keeps events, not UI chrome.
         self.log_view.append_log(f"{self.i18n.t('fishing_log')}\n\n")
+        self.log_view.set_log_file(self.paths["fishing_log"])
         apply_theme(QApplication.instance(), self.prefs.get("Color Theme", "blue"))
         self.restore_geometry_from_prefs()
         self.apply_window_mode(self.prefs.get("window_mode", "normal"))
@@ -113,8 +125,14 @@ class MainWindow(QMainWindow):
         self.log_view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
+        self.paths.setdefault("fishing_log", fishing_log_path())
         self.copy_log_button = AnimatedButton(self.i18n.t("log_copy_all"), left)
         self.copy_log_button.clicked.connect(self.log_view.copy_all)
+        self.clear_log_button = AnimatedButton(
+            self.i18n.t("log_clear"), left
+        )
+        self.clear_log_button.setObjectName("secondaryButton")
+        self.clear_log_button.clicked.connect(self.log_view.clear_log)
 
         left_layout.addWidget(self.title_label)
         left_layout.addWidget(self.start_button)
@@ -122,7 +140,11 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.aim_button)
         left_layout.addWidget(self.status_label)
         left_layout.addWidget(self.log_view, 1)
-        left_layout.addWidget(self.copy_log_button)
+        buttons_row = QHBoxLayout()
+        buttons_row.setSpacing(8)
+        buttons_row.addWidget(self.copy_log_button)
+        buttons_row.addWidget(self.clear_log_button)
+        left_layout.addLayout(buttons_row)
 
         self.main_tabs = QTabWidget(body)
         self.catch_tab = CatchTab(
@@ -165,6 +187,36 @@ class MainWindow(QMainWindow):
         with open(self.paths["statistics_json"], "w", encoding="utf-8") as f:
             json.dump(self.statistics, f, indent=4, ensure_ascii=False)
 
+    def _log_event(self, event: str, item_id, **extra):
+        """Append one fishing event to fishing_events.jsonl (JSON lines).
+
+        Machine-readable counterpart of the journal: one JSON object per
+        line so catches, snaps and escapes can be analyzed after a session.
+        """
+        record = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "event": event,
+            "item_id": item_id,
+            "item": (
+                self.catch_name_for_id(item_id) if item_id is not None else None
+            ),
+        }
+        record.update(extra)
+        path = self.paths.get("events_log")
+        if not path:
+            app_dir = self.paths.get("app_dir")
+            path = (
+                Path(app_dir) / "fishing_events.jsonl"
+                if app_dir
+                else events_log_path()
+            )
+            self.paths["events_log"] = path
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
     def current_lang(self):
         return self.prefs.get("language", "ru")
 
@@ -173,6 +225,12 @@ class MainWindow(QMainWindow):
         if entry:
             return catch_display_name(entry, self.current_lang())
         return self.i18n.t("unknown_item", id=item_id)
+
+    def _status_item_id(self, msg):
+        try:
+            return int(msg.split(":", 1)[1])
+        except (IndexError, ValueError):
+            return None
 
     def _bot_running(self):
         return (
@@ -301,6 +359,13 @@ class MainWindow(QMainWindow):
             probe_enabled=bool(self.prefs.get("projectile_probe")),
             probe_log_path=str(probe_log_path()),
             on_input_busy=self.auto_drink.set_suspended,
+            debug_log_path=(
+                str(debug_log_path()) if self.prefs.get("debug_log") else None
+            ),
+            layout_cache_path=str(layout_cache_path()),
+            restore_minimized_window=bool(
+                self.prefs.get("restore_minimized_window")
+            ),
         )
         self.log_message(self.i18n.t("mem_looking") + "\n")
         self.log_message(self.i18n.t("hook_started") + "\n")
@@ -350,6 +415,16 @@ class MainWindow(QMainWindow):
             self.status_label.setText(self.i18n.t("mem_hooked"))
             self.log_message(self.i18n.t("mem_hooked") + "\n")
             self._maybe_start_auto_drink()
+        elif msg == "calibrating":
+            self.log_message(self.i18n.t("mem_calibrating") + "\n")
+        elif msg == "calibrated":
+            self.log_message(self.i18n.t("mem_calibrated") + "\n\n")
+        elif msg == "calibrate_timeout":
+            self.log_message(
+                self.i18n.t("mem_calibrate_timeout") + "\n"
+            )
+        elif msg == "initial_cast":
+            self.log_message(self.i18n.t("mem_initial_cast") + "\n")
         elif msg == "aim_prompt":
             self.status_label.setText(self.i18n.t("aim_button"))
             self.log_message(self.i18n.t("aim_prompt") + "\n")
@@ -373,8 +448,42 @@ class MainWindow(QMainWindow):
                 )
         elif msg == "reel_failed":
             self.log_message(self.i18n.t("mem_reel_failed") + "\n")
+        elif msg.startswith("caught_recovery:"):
+            item_id = self._status_item_id(msg)
+            if item_id is not None:
+                self.on_catch_recovery(item_id)
+                return
+        elif msg.startswith("reel_retrying:"):
+            item_id = self._status_item_id(msg)
+            if item_id is not None:
+                name = self.catch_name_for_id(item_id)
+                self.log_message(
+                    self.i18n.t("mem_reel_retrying", name=name) + "\n"
+                )
+        elif msg.startswith("line_snapped:"):
+            item_id = self._status_item_id(msg)
+            if item_id is not None:
+                name = self.catch_name_for_id(item_id)
+                self.log_message(
+                    self.i18n.t("mem_line_snapped", name=name) + "\n"
+                )
+                self._log_event("line_snapped", item_id)
+        elif msg.startswith("bite_escaped:"):
+            item_id = self._status_item_id(msg)
+            if item_id is not None:
+                name = self.catch_name_for_id(item_id)
+                self.log_message(
+                    self.i18n.t("mem_bite_escaped", name=name) + "\n"
+                )
+                self._log_event("bite_escaped", item_id)
+        elif msg == "reel_failed_recast":
+            self.log_message(self.i18n.t("mem_reel_failed_recast") + "\n")
         elif msg == "recast_failed":
             self.log_message(self.i18n.t("mem_recast_failed") + "\n")
+        elif msg == "anim_dead":
+            self.log_message(self.i18n.t("mem_anim_dead") + "\n\n")
+        elif msg == "dunk_unavailable":
+            self.log_message(self.i18n.t("mem_dunk_unavailable") + "\n\n")
         elif msg == "focus_failed":
             self.log_message(self.i18n.t("mem_focus_failed") + "\n")
         elif msg == "auto_drink_buffs_missing":
@@ -424,6 +533,33 @@ class MainWindow(QMainWindow):
             en_key = None
             display = self.i18n.t("unknown_item", id=item_id)
         self.log_message(self.i18n.t("caught", name=display) + "\n")
+        self._log_event("catch", item_id)
+        if not en_key:
+            return
+        for key in self.statistics.keys():
+            if en_key in self.statistics[key]:
+                self.statistics[key][en_key] += 1
+                self.stats_tab.update_counts()
+                self._save_statistics()
+                break
+
+    def on_catch_recovery(self, item_id):
+        """Catch confirmed by bobber disappearance: log it and count it.
+
+        Same accounting as on_catch, but with the recovery wording so the
+        journal distinguishes how the catch was verified.
+        """
+        entry = self.catches["by_id"].get(int(item_id))
+        if entry:
+            en_key = entry["en"]
+            display = catch_display_name(entry, self.current_lang())
+        else:
+            en_key = None
+            display = self.i18n.t("unknown_item", id=item_id)
+        self.log_message(
+            self.i18n.t("mem_caught_recovery", name=display) + "\n"
+        )
+        self._log_event("catch_recovered", item_id)
         if not en_key:
             return
         for key in self.statistics.keys():
@@ -439,9 +575,19 @@ class MainWindow(QMainWindow):
         probe_on = self.settings_tab.probe_on()
         was_probe = bool(self.prefs.get("projectile_probe"))
         self.prefs["projectile_probe"] = probe_on
+        self.prefs["debug_log"] = self.settings_tab.debug_on()
+        self.prefs["restore_minimized_window"] = (
+            self.settings_tab.restore_minimized_window_on()
+        )
         self._save_prefs()
         if self.memory_bot is not None:
             self.memory_bot.set_probe_enabled(probe_on)
+            self.memory_bot.set_debug_enabled(
+                self.settings_tab.debug_on(), str(debug_log_path())
+            )
+            self.memory_bot.set_restore_minimized_window(
+                self.settings_tab.restore_minimized_window_on()
+            )
         if probe_on and not was_probe:
             self.log_message(
                 self.i18n.t("projectile_probe_file", path=str(probe_log_path())) + "\n"

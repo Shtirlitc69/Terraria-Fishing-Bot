@@ -3,11 +3,16 @@
 Does not click, write memory, or change fishing behaviour. Armed by a GUI
 switch; 2s windows start after a successful hook and at recast. Manual LMB
 windows only fire over Terraria (not the bot's SendInput or Stop).
-type @+0x7C and owner @+0x5C are confirmed; other prefix fields are hypothesized.
+type @+0x80 and owner @+0x5C are confirmed; other prefix fields are hypothesized.
+Bobber records carry every CLR float[] of length AI_ARRAY_LENS reachable from
+the object (`ai_arrays`), the elements that are negative (`ai_negative`) and
+the live rolledItemDrop. On 1.4.5.8 that is ai at +0x40 and localAI at +0x44,
+and `ai_negative` marks the dunk.
 """
 from __future__ import annotations
 
 import json
+import struct
 import threading
 import time
 from pathlib import Path
@@ -21,17 +26,25 @@ USER_SPACE_END = 0x7FFFFFFF
 PROBE_WINDOW_S = 2.0
 PROBE_SNAPSHOT_S = 0.05
 PROJECTILE_ARRAY_LENS = frozenset((1000, 1001))
-PROJ_STATIC_OFF_FROM_PLAYER = 0x4C
-# Same content-based thresholds as memory_bot.py's _is_projectile_array.
+PROJ_STATIC_OFF_FROM_PLAYER = 0x48
+PROJ_STATIC_OFFS_FROM_PLAYER = (0x48, 0x4C)
 PROJECTILE_MIN_NON_NULL = 20
 PROJECTILE_MIN_WHOAMI_MATCH = 10
-OBJ_PREFIX = 0x80  # through type at +0x7C
+OBJ_PREFIX = 0x100  # through type at +0x80 and ai/localAI pointers
+CLR_SZARRAY_LEN_OFF = 4
+CLR_SZARRAY_F0_OFF = 8
+# Projectile.ai / localAI are float[maxAI] and maxAI is 3. A 300s live 1.4.5.8
+# capture put ai at field +0x40 and localAI at +0x44, both float[3] sharing one
+# MethodTable; no float[2] exists on the object. Accept a small range so a
+# future maxAI change still logs something.
+AI_ARRAY_LENS = frozenset((2, 3, 4))
+AI_DUNK_INDEX = 1  # ai[1] < 0 exactly while a fish pulls the bobber under
 HYP_WHOAMI_OFF = 0x04
 HYP_ACTIVE_OFF = 0x08
 HYP_WIDTH_OFF = 0x10
 HYP_HEIGHT_OFF = 0x14
 OFF_PROJ_OWNER = 0x5C
-OFF_PROJ_TYPE = 0x7C
+OFF_PROJ_TYPE = 0x80
 STATIC_SCAN_SPAN = 0x8000
 STATIC_SCAN_BACK = 0x2000
 MAX_SEARCH_READ_ERRORS = 5
@@ -48,11 +61,14 @@ def _hex_addr(addr: int) -> str:
 
 
 def _rank_array_candidate(r: dict):
-    """Rank whoAmI==index matches first, then non_null. A length-1000
-    table with ~257 pointers and whoami_matches=0 is not Main.projectile.
+    """Prefer length-1001 Main.projectile, then whoAmI matches, then fill.
+
+    A length-1000 table with many pointers and whoami_matches=0 is a decoy.
     """
     dist = int(r.get("dist") or 0)
+    length = int(r.get("length") or 0)
     return (
+        0 if length == 1001 else 1,
         -int(r.get("whoami_matches") or 0),
         -int(r.get("non_null") or 0),
         dist,
@@ -150,6 +166,21 @@ class ProjectileProbe:
             return read_table(addr, count)
         return self._read_bytes(addr, max(0, count) * 4)
 
+    def _read_rolled(self) -> Optional[int]:
+        """rolledItemDrop as the host last resolved it, or None.
+
+        Read straight from the cached pointer: the host's _read_rolled()
+        re-resolves the context and can re-hook, which a read-only probe
+        must never trigger.
+        """
+        ptr = int(getattr(self._host, "_rolled_ptr", 0) or 0)
+        if not ptr:
+            return None
+        try:
+            return self._read_u32(ptr)
+        except RuntimeError:
+            return None
+
     def _bot_clicking(self) -> bool:
         return int(getattr(self._host, "_bot_lmb_depth", 0) or 0) > 0
 
@@ -229,11 +260,12 @@ class ProjectileProbe:
             sig_match=_hex_addr(getattr(host, "_sig_match", 0) or 0),
             sig_source=getattr(host, "_sig_source", "") or "",
             sig_name="FishingCheck",
-            game_assumed="1.4.5.6",
+            game_assumed="1.4.5.8",
             probe_reason=reason,
             window_s=PROBE_WINDOW_S,
             snapshot_s=PROBE_SNAPSHOT_S,
-            fields="confirmed:type@0x7c,owner@0x5c",
+            ai_lens=sorted(AI_ARRAY_LENS),
+            fields="confirmed:type@0x80,owner@0x5c",
         )
         candidates = self._find_array_candidates(reason=reason)
         chosen = None
@@ -332,7 +364,7 @@ class ProjectileProbe:
             who = _u32(data, HYP_WHOAMI_OFF)
             if who == slot:
                 whoami_matches += 1
-            if data[HYP_ACTIVE_OFF] == 1:
+            if data[HYP_ACTIVE_OFF] != 0:
                 hyp_active += 1
         return {
             "non_null": non_null,
@@ -398,8 +430,10 @@ class ProjectileProbe:
                         err=str(exc),
                         what="host_projectile_static",
                     )
-        rel_slot = (player_s - PROJ_STATIC_OFF_FROM_PLAYER) if player_s else 0
-        if rel_slot:
+        for off in PROJ_STATIC_OFFS_FROM_PLAYER:
+            rel_slot = (player_s - off) if player_s else 0
+            if not rel_slot:
+                continue
             try:
                 arr = self._read_u32(rel_slot)
                 length = self._read_u32(arr + 4)
@@ -410,7 +444,7 @@ class ProjectileProbe:
                         rel_slot,
                         arr,
                         length,
-                        PROJ_STATIC_OFF_FROM_PLAYER,
+                        off,
                     )
             except RuntimeError as exc:
                 self._search_read_errors += 1
@@ -514,11 +548,11 @@ class ProjectileProbe:
             type_raw = self._read_bytes(ptr + OFF_PROJ_TYPE, 4)
             active_b = head[HYP_ACTIVE_OFF] if len(head) > HYP_ACTIVE_OFF else 0
             type_val = _u32(type_raw, 0) if len(type_raw) >= 4 else None
-            if active_b == 1:
+            if active_b != 0:
                 hyp_active += 1
             is_dummy = dummy_slot is not None and slot == dummy_slot
             want = (
-                active_b == 1
+                active_b != 0
                 or type_val in BOBBER_TYPES
                 or is_dummy
             )
@@ -542,7 +576,7 @@ class ProjectileProbe:
                 "rel": round(rel, 4),
                 "slot": slot,
                 "ptr": _hex_addr(ptr),
-                "fields": "confirmed:type@0x7c,owner@0x5c",
+                "fields": "confirmed:type@0x80,owner@0x5c",
                 "whoAmI": parsed["whoAmI"],
                 "whoAmI_off": _hex_addr(HYP_WHOAMI_OFF),
                 "active": parsed["active"],
@@ -555,6 +589,21 @@ class ProjectileProbe:
                 "type_off": _hex_addr(OFF_PROJ_TYPE),
                 "kind": parsed["kind"],
             }
+            if parsed["type"] in BOBBER_TYPES:
+                arrays = self._read_bobber_ai(ptr, data)
+                if arrays:
+                    rec["ai_arrays"] = arrays
+                    neg = [
+                        {"off": a["off"], "len": a["len"], "i": i, "v": v}
+                        for a in arrays
+                        for i, v in enumerate(a["vals"])
+                        if v < 0.0
+                    ]
+                    if neg:
+                        rec["ai_negative"] = neg
+                rolled = self._read_rolled()
+                if rolled is not None:
+                    rec["rolled"] = rolled
             if (not is_dummy) and ptr not in dumped_ptr:
                 dumped_ptr.add(ptr)
                 rec["hex"] = data[:OBJ_PREFIX].hex()
@@ -565,6 +614,48 @@ class ProjectileProbe:
                 break
         return n_proj, non_null, null_slots, hyp_active, logged
 
+    def _read_bobber_ai(self, ptr: int, data: bytes):
+        """Every CLR float[] of length AI_ARRAY_LENS reachable from the blob.
+
+        Returns a list of {"off", "len", "vals"} sorted by field offset. The
+        dunk detector needs the real array length and the index that goes
+        negative, so log all of them instead of guessing float[2][1].
+        """
+        scan = data
+        if len(scan) < OBJ_PREFIX:
+            extra = self._read_bytes(ptr, OBJ_PREFIX)
+            if extra and len(extra) > len(scan):
+                scan = extra
+        host_offs = list(getattr(self._host, "_ai_offs", None) or [])
+        if host_offs:
+            candidates = host_offs
+        else:
+            candidates = list(range(0, max(0, len(scan) - 3), 4))
+        found = []
+        for off in candidates:
+            arr = _u32(scan, off)
+            if arr is None or not (0x10000 < arr < USER_SPACE_END):
+                continue
+            try:
+                length = self._read_u32(arr + CLR_SZARRAY_LEN_OFF)
+            except RuntimeError:
+                continue
+            if length not in AI_ARRAY_LENS:
+                continue
+            raw = self._read_bytes(arr + CLR_SZARRAY_F0_OFF, length * 4)
+            if len(raw) < length * 4:
+                continue
+            vals = [
+                round(v, 5)
+                for v in struct.unpack(f"<{length}f", raw[:length * 4])
+            ]
+            found.append({
+                "off": _hex_addr(off),
+                "len": int(length),
+                "vals": vals,
+            })
+        return found
+
     def _parse_prefix(self, data: bytes, slot: int, my_player: int) -> dict:
         who = _u32(data, HYP_WHOAMI_OFF)
         active_b = data[HYP_ACTIVE_OFF] if len(data) > HYP_ACTIVE_OFF else 0
@@ -573,8 +664,8 @@ class ProjectileProbe:
         owner_val = _u32(data, OFF_PROJ_OWNER)
         type_val = _u32(data, OFF_PROJ_TYPE)
         if type_val in BOBBER_TYPES:
-            kind = "bobber_type"
-        elif active_b == 1:
+            kind = "bobber_type" if active_b != 0 else "dead_pool"
+        elif active_b != 0:
             kind = "active"
         elif who == slot:
             kind = "whoami_slot"

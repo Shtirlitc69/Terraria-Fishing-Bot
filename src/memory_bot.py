@@ -1,23 +1,31 @@
 """Memory-based fishing bot for Terraria 1.4.5.x (replaces the IL-patch path).
 
-Reads `Projectile._context.FishingAttempt.rolledItemDrop` from the live game
-process. Matching whitelist bites are reeled with a real left-click. Terraria
-copies mouse state over `controlUseItem` every frame, so the bot pulses that
-flag during LMB. Recast holds until a new local bobber is active or
-`itemAnimation` rises, then releases before a second use can reel. It does
-not repeat `releaseUseItem`. Reel retries until `itemAnimation` rises. Bites
-are detected when the rolled id changes. After recast the next nonzero id is
-a new bite.
+A bite is the fishing bobber dunk: Projectile.ai[1] goes negative
+(AI_061_FishingBobber). rolledItemDrop is only the item id for the
+whitelist — the game leaves that field sticky, so a restored id is not a
+bite. One reel click on dunk, then a bobber-verified recast. Recast must not pulse
+releaseUseItem: that edge starts a second use and reels the fresh bobber.
+
+ai and localAI are float[maxAI] with maxAI == 3, not float[2]. A 300s live
+1.4.5.8 capture put ai at field +0x40 and localAI at +0x44, both float[3]
+sharing one MethodTable; ai[1] was negative only while a fish pulled the
+bobber under, and localAI[1] mirrored rolledItemDrop during every dunk
+(2108/2108 samples). Requiring an exact length of 2 matched nothing and left
+the bot hooked but idle, never casting. If those offsets stop resolving the
+loop degrades to the older rule (a change of rolledItemDrop is a bite) and
+reports `dunk_unavailable`.
 
 Field offsets and Main.player were recovered from the 1.4.5.6 x86 JIT:
 controlUseItem is +0x782 on Player; itemAnimation is +0x64C; Main.player is
 the static Player[256] near Projectile._context; Main.myPlayer is the static
-int paired with that array in JIT.
+int paired with that array in JIT. Projectile.type is +0x80 on 1.4.5.8.
 """
 from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+import json
+import struct
 import threading
 import time
 from collections import Counter
@@ -64,13 +72,37 @@ OFF_ENTITY_HEIGHT = 0x14
 OFF_ITEM_ANIMATION = 0x64C
 OFF_CONTROL_USE_ITEM = 0x782
 OFF_RELEASE_USE_ITEM = 0x792  # release* cluster after control*; edge for ItemCheck
+# Multiplayer 1.4.5.8 x86: monotonically increments once per Player update.
+# This is only an input-frame marker; it is not used for bite detection.
+OFF_PLAYER_FRAME_TICK = 0x228
 PLAYER_WIDTH = 20
 PLAYER_HEIGHT = 42
 PLAYER_HEIGHTS = (42, 23, 24)  # standing / sitting-ish
 HYP_WHOAMI_OFF = 0x04
 HYP_ACTIVE_OFF = 0x08
 OFF_PROJ_OWNER = 0x5C
-OFF_PROJ_TYPE = 0x7C
+# Live 1.4.5.8 dump: type moved +4 from the 1.4.5.6 slot (0x7C -> 0x80).
+OFF_PROJ_TYPE = 0x80
+_DEFAULT_LAYOUT = {
+    "active_off": HYP_ACTIVE_OFF,
+    "owner_off": OFF_PROJ_OWNER,
+    "type_off": OFF_PROJ_TYPE,
+    "ai_offs": [],
+}
+# CLR SzArray<float> on x86: MT @0, length @+4, float[0] @+8, float[1] @+12.
+CLR_SZARRAY_LEN_OFF = 4
+CLR_SZARRAY_F0_OFF = 8
+CLR_SZARRAY_F1_OFF = 12
+# Projectile.ai / localAI are float[maxAI] and maxAI is 3, not 2. A live
+# 1.4.5.8 capture (300s, 4214 samples) found ai at field +0x40 and localAI at
+# +0x44, both float[3] sharing one MethodTable; no float[2] is reachable from
+# the object at all. Accept a small range so a future maxAI change degrades
+# instead of silently disabling bite detection.
+AI_ARRAY_LENS = frozenset((2, 3, 4))
+# ai[1] is the dunk depth: negative while a fish pulls the bobber under.
+# Confirmed against localAI[1], which mirrors rolledItemDrop during a dunk
+# (2108/2108 samples matched, and ai[1] was never negative with rolled == 0).
+AI_DUNK_INDEX = 1
 STATIC_SCAN_RADIUS = 0x40000  # ±256 KiB around a context static
 PROJECTILE_ARRAY_LEN = 1001
 PROJECTILE_ARRAY_LENS = frozenset((1000, 1001))
@@ -78,19 +110,29 @@ PROJECTILE_ARRAY_LENS = frozenset((1000, 1001))
 # _projectile_array_richness). Live data: the real array is length 1001,
 # dense, with many whoAmI==index matches. A nearby length-1000 table with
 # ~257 non-null slots and whoami_matches=0 is not Main.projectile. Dummy-only
-# 1001 (slot 1000 only) is a stale/empty table, not the live array.
+# 1001 (slot 1000 only) is an empty-but-valid table: keep the player-rel
+# slot rather than switching to a dense decoy.
 PROJECTILE_VALIDATE_SLOTS = 300
 PROJECTILE_MIN_NON_NULL = 20
 PROJECTILE_MIN_WHOAMI_MATCH = 10
 PROJECTILE_LIVE_SLOTS = 1000  # dummy extra slot 1000 is ignored
-PROJ_STATIC_OFF_FROM_PLAYER = 0x4C  # Main.projectile = Main.player - 0x4C
+# 1.4.5.6 was 0x4C; 1.4.5.8 live dump used 0x48. Try both.
+PROJ_STATIC_OFF_FROM_PLAYER = 0x4C
+PROJ_STATIC_OFFS_FROM_PLAYER = (0x48, 0x4C)
 PROJ_OCCUPANCY_SAMPLE = 32
 PROJ_OCCUPANCY_MIN = 2  # unused as a recast gate; dummy-only 1001 is valid
-BOBBER_OBJ_PREFIX = 0x80  # through type at +0x7C
+BOBBER_OBJ_PREFIX = 0x90  # through type at +0x80 and the duplicate at +0x88
 BOBBER_TYPES = frozenset(
     list(range(360, 367)) + list(range(378, 383)) + list(range(760, 765))
     + [775] + list(range(986, 994))
 )
+BOBBER_CALIB_TIMEOUT_S = 60.0
+BOBBER_CALIB_MAX_CANDIDATES = 5
+BOBBER_CALIB_SCAN_LEN = 0x100
+BOBBER_CALIB_STABLE_FRAMES = 3
+BOBBER_CALIB_EXTRA_S = 0.5
+CALIB_POLL_S = 0.05
+LAYOUT_CACHE_NAME = "bobber_layout.json"
 ROLLED_ITEM_DROP_OFF = 0x68
 HOOK_ERROR_CANDIDATES_MAX = 24
 
@@ -115,20 +157,26 @@ user32.AttachThreadInput.restype = wt.BOOL
 CLICK_HOLD_S = 0.03
 AIM_SETTLE_S = 0.05
 REEL_RETRY_PAUSE_S = 0.3
-REEL_MAX_CLICKS = 3
 CATCH_DELAY_S = 0.25
+LINE_SNAP_GRACE_S = 0.6
 RECAST_INTERVAL_S = 1.0
 RECAST_SETTLE_S = 1.0
-RECAST_ANIM_TIMEOUT_S = 5.0
-RECAST_HOLD_S = 0.016
-RECAST_HOLD_MAX_S = 0.250
+# The two animation waits plus the catch/interval pause must stay within
+# roughly two seconds. Bobber verification still blocks an unsafe recast.
+RECAST_ANIM_TIMEOUT_S = 0.5
+WAIT_ANIM_CLEAR_S = 0.25
+# Wait for actual Player updates instead of a Windows-clock hold.  A stalled
+# game therefore produces no click, rather than a delayed second use.
+RECAST_TICK_TIMEOUT_S = 0.50
 RECAST_STABLE_S = 0.160
 RECAST_OLD_BOBBER_WAIT_S = 0.5
 RECAST_POLL_S = 0.002
-RECAST_MAX_CLICKS = 3
-RECAST_RETRY_PAUSE_S = 0.35
+RECAST_MAX_CLICKS = 2
+RECAST_RETRY_PAUSE_S = 0.80
 BOBBER_WAIT_S = 1.0
 USE_ITEM_PULSE_S = 0.002
+AI_OFFS_RETRY_S = 2.0  # poll-loop throttle for ai-offset rediscovery
+DUNK_FALLBACK_AFTER_S = 20.0  # then bite = rolledItemDrop changed
 INPUT_MOUSE = 0
 ULONG_PTR = ctypes.c_size_t
 
@@ -189,6 +237,7 @@ _HOOK_CACHE: dict = {
     "sig_match": 0,
     "sig_source": "",
     "projectile_static": 0,
+    "bobber_layout": None,  # active/owner/type/ai_offs after calib
 }
 
 
@@ -396,6 +445,9 @@ class MemoryBot:
         probe_enabled=False,
         probe_log_path=None,
         on_input_busy=None,
+        debug_log_path=None,
+        layout_cache_path=None,
+        restore_minimized_window=False,
     ):
         self.on_catch = on_catch
         self.on_status = on_status
@@ -407,19 +459,35 @@ class MemoryBot:
         self.on_aim = on_aim
         self._probe_enabled = bool(probe_enabled)
         self._probe_log_path = probe_log_path
+        self._debug_lock = threading.Lock()
+        self._debug_path = debug_log_path
+        self._layout_cache_path = layout_cache_path
+        self._restore_minimized_window = bool(restore_minimized_window)
 
         self.stop_event = threading.Event()
         self._need_aim = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self._focus_fail_notified = False
         self._last_logged_rolled = None
+        self._anim_ever_rose = False
+        self._bobber_verified_reel = False
+        self._failed_probe_done = False
+        self._bobber_verified_layout = False
         self._t0 = 0.0
+        self._ai_offs: list = []
+        self._ai_offs_retry_at = 0.0
+        self._ai_offs_fail_count = 0
+        self._ai_read_ok = False
+        self._dunk_fallback = False
+        self._fallback_last_id = 0
+        self._dunk_latched = False
         self._bot_lmb_depth = 0
         self._probe = None
         self._sig_match = 0
         self._sig_source = ""
         self._myplayer_fallback_idx = None
         self._projectile_static = 0
+        self.bobber_layout: Optional[dict] = None
 
         self.pm: Optional[pymem.Pymem] = None
         self.process_handle = None
@@ -440,6 +508,9 @@ class MemoryBot:
     def stop(self):
         self.stop_event.set()
         self._need_aim.set()
+        # Safety: if the thread died mid-click (or is stuck in SendInput),
+        # make sure the physical LMB state and controlUseItem are cleared.
+        self._lmb_release()
         self._set_input_busy(False)
         if self.thread:
             self.thread.join(timeout=15.0)
@@ -454,6 +525,12 @@ class MemoryBot:
         self._probe_enabled = bool(enabled)
         if self._probe is not None:
             self._probe.set_enabled(self._probe_enabled)
+
+    def set_debug_enabled(self, enabled: bool, path: str):
+        self._debug_path = path if enabled else None
+
+    def set_restore_minimized_window(self, enabled: bool):
+        self._restore_minimized_window = bool(enabled)
 
     def _start_probe(self):
         if not self._probe_log_path or self._probe is not None:
@@ -494,13 +571,17 @@ class MemoryBot:
         self.on_status("hooked")
         self._t0 = time.monotonic()
         self._start_probe()
-        last_fish_id = 0
-        self._phase(f"loop_start last={last_fish_id}")
+        self._debug_log("hooked")
+        self._log_hook_addrs()
+        self._dunk_latched = False
+        self._phase("loop_start")
         try:
             if not self.aim_client:
                 if not self._capture_aim():
                     return
                 self._emit_aim()
+            self._sanitize_start()
+            self._log_hook_addrs()
             while not self.stop_event.is_set():
                 if self._need_aim.is_set():
                     self._need_aim.clear()
@@ -508,62 +589,55 @@ class MemoryBot:
                     if not self._capture_aim():
                         return
                     self._emit_aim()
-                    last_fish_id = 0
-                    self._phase("aim_reset last=0")
+                    self._dunk_latched = False
+                    self._fallback_last_id = 0
+                    self._phase("aim_reset")
                     continue
                 if not self.aim_client:
                     time.sleep(self.poll_interval)
                     continue
-                item_id = self._read_rolled()
-                if not item_id:
-                    if last_fish_id != 0:
-                        self._phase(f"rolled_zero_clears_last was={last_fish_id}")
-                    last_fish_id = 0
+                item_id = self._next_bite()
+                if item_id is None:
                     time.sleep(self.poll_interval)
                     continue
-                if item_id == last_fish_id:
-                    time.sleep(self.poll_interval)
-                    continue
-                self._phase(
-                    f"id_changed last={last_fish_id} now={item_id} "
-                    f"allow={int(item_id in self.whitelist_ids)}"
-                )
-                last_fish_id = item_id
                 allow = item_id in self.whitelist_ids
-                if not allow:
-                    self.on_status(f"bite:{item_id}:skip")
-                if allow:
-                    self._set_input_busy(True)
-                    try:
-                        self._phase(f"reel_begin id={item_id}")
-                        if not self._reel_until_started():
-                            self.on_status("reel_failed")
-                            self._phase("reel_failed keep last")
-                            time.sleep(self.poll_interval)
-                            continue
-                        self._phase("reel_ok wait_anim")
-                        self._wait_animation_clear()
-                        if self.stop_event.is_set():
+                self._phase(f"bite id={item_id} allow={int(allow)}")
+                self._probe_failed_fishing_flag()
+                self._set_input_busy(True)
+                try:
+                    if not allow:
+                        self.on_status(f"bite:{item_id}:skip")
+                        self._phase("skip_reel")
+                        self._click_left("reel")
+                        self._clear_bite_latch()
+                        if not self._pause_then_recast():
                             break
-                        self._phase(
-                            f"pause_before_recast "
-                            f"catch={CATCH_DELAY_S}s interval={RECAST_INTERVAL_S}s"
-                        )
-                        self._sleep_interruptible(CATCH_DELAY_S)
-                        self._sleep_interruptible(RECAST_INTERVAL_S)
-                        self._phase("zero_rolled last=0")
-                        self._zero_rolled()
-                        last_fish_id = 0
-                        self.on_catch(item_id)
-                        self._wait_animation_clear(RECAST_ANIM_TIMEOUT_S)
-                        if self.stop_event.is_set():
-                            break
-                        self._phase("recast_click")
-                        if not self._recast_until_bobber():
-                            break
-                        self._phase(f"back_to_loop last={last_fish_id}")
-                    finally:
-                        self._set_input_busy(False)
+                        continue
+                    self._phase(f"reel_begin id={item_id}")
+                    self._phase("reel_click attempt=1/1")
+                    self._click_left("reel")
+                    self._phase("reel_ok wait_anim")
+                    self._wait_animation_clear()
+                    if self.stop_event.is_set():
+                        break
+                    self._phase(
+                        f"pause_before_recast "
+                        f"catch={CATCH_DELAY_S}s interval={RECAST_INTERVAL_S}s"
+                    )
+                    self._sleep_interruptible(CATCH_DELAY_S)
+                    self._sleep_interruptible(RECAST_INTERVAL_S)
+                    self._clear_bite_latch()
+                    self.on_catch(item_id)
+                    self._wait_animation_clear(RECAST_ANIM_TIMEOUT_S)
+                    if self.stop_event.is_set():
+                        break
+                    self._phase("recast_click")
+                    if not self._recast_until_bobber():
+                        break
+                    self._dunk_latched = False
+                    self._phase("back_to_loop")
+                finally:
+                    self._set_input_busy(False)
                 time.sleep(self.poll_interval)
         finally:
             self._close_handles()
@@ -678,6 +752,7 @@ class MemoryBot:
         self._sig_source = "cached"
         self._myplayer_fallback_idx = _HOOK_CACHE.get("myplayer_fallback_idx")
         self._projectile_static = _HOOK_CACHE.get("projectile_static") or 0
+        self.bobber_layout = _HOOK_CACHE.get("bobber_layout")
         if self._projectile_static and not self._projectile_static_ok(
             self._projectile_static
         ):
@@ -739,6 +814,428 @@ class MemoryBot:
             "sig_source": self._sig_source,
             "projectile_static": self._projectile_static,
         })
+        if self.bobber_layout:
+            _HOOK_CACHE["bobber_layout"] = dict(self.bobber_layout)
+
+    def _apply_bobber_layout(self, layout: Optional[dict]):
+        """Install calibrated offsets (None reverts to the built-in ones)."""
+        global OFF_PROJ_TYPE, OFF_PROJ_OWNER, HYP_ACTIVE_OFF
+        if layout:
+            OFF_PROJ_TYPE = int(layout["type_off"])
+            OFF_PROJ_OWNER = int(layout["owner_off"])
+            HYP_ACTIVE_OFF = int(layout["active_off"])
+            self._ai_offs = [int(x) for x in (layout.get("ai_offs") or [])]
+            self._phase(
+                f"bobber_layout type@{OFF_PROJ_TYPE:#x} "
+                f"owner@{OFF_PROJ_OWNER:#x} active@{HYP_ACTIVE_OFF:#x} "
+                f"ai_offs={','.join(f'{o:#x}' for o in self._ai_offs) or '-'}"
+            )
+            stored = dict(layout)
+            stored["ai_offs"] = list(self._ai_offs)
+            self.bobber_layout = stored
+            _HOOK_CACHE["bobber_layout"] = dict(stored)
+            return
+        OFF_PROJ_TYPE = _DEFAULT_LAYOUT["type_off"]
+        OFF_PROJ_OWNER = _DEFAULT_LAYOUT["owner_off"]
+        HYP_ACTIVE_OFF = _DEFAULT_LAYOUT["active_off"]
+        self._ai_offs = []
+        self.bobber_layout = None
+        _HOOK_CACHE["bobber_layout"] = None
+
+    def _read_live_projectiles(self, need_blob: bool = False) -> list:
+        """Active projectiles owned by the local player as (slot, ptr[, blob]).
+
+        Uses the calibrated layout when present; falls back to the built-in
+        offsets otherwise.
+        """
+        layout = self.bobber_layout or _DEFAULT_LAYOUT
+        arr = self._read_u32(self._projectile_static)
+        length = self._read_u32(arr + 4)
+        my_player = self._my_player_id()
+        n = min(PROJECTILE_LIVE_SLOTS, max(0, length))
+        blob = self._read_u32_table(arr + 8, n)
+        out = []
+        for slot in range(n):
+            ptr = int.from_bytes(blob[slot * 4:slot * 4 + 4], "little")
+            if not (0x10000 < ptr < USER_SPACE_END):
+                continue
+            try:
+                active = self._read_u8(ptr + layout["active_off"])
+                owner = self._read_u32(ptr + layout["owner_off"])
+            except RuntimeError:
+                continue
+            if active == 0 or owner != my_player:
+                continue
+            if need_blob:
+                try:
+                    data = self._read_bytes(ptr, BOBBER_CALIB_SCAN_LEN)
+                except RuntimeError:
+                    continue
+                out.append((slot, ptr, data))
+            else:
+                out.append((slot, ptr))
+        return out
+
+    def _raw_projectile_ptrs(self) -> set:
+        """Valid pointers from Main.projectile regardless of any field layout."""
+        return {ptr for _, ptr, _ in self._raw_projectile_blobs()}
+
+    def _raw_projectile_blobs(self) -> list:
+        """(slot, ptr, blob) for every valid pointer; no owner/active filter.
+
+        Terraria reuses a pool of Projectile objects, so a bobber is almost
+        never a brand-new pointer. Calibration therefore diffs blob content
+        (a bobber type id appearing) rather than pointer identity.
+        """
+        arr = self._read_u32(self._projectile_static)
+        n = min(PROJECTILE_LIVE_SLOTS, max(0, self._read_u32(arr + 4)))
+        table = self._read_u32_table(arr + 8, n)
+        out = []
+        for slot in range(n):
+            ptr = int.from_bytes(table[slot * 4:slot * 4 + 4], "little")
+            if not (0x10000 < ptr < USER_SPACE_END):
+                continue
+            try:
+                data = self._read_bytes(ptr, BOBBER_CALIB_SCAN_LEN)
+            except RuntimeError:
+                continue
+            out.append((slot, ptr, data))
+        return out
+
+    def _load_cached_layout(self):
+        """Cached bobber layout from disk, or None."""
+        if not self._layout_cache_path:
+            return None
+        try:
+            with open(self._layout_cache_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        try:
+            layout = {
+                "active_off": int(data["active_off"]),
+                "owner_off": int(data["owner_off"]),
+                "type_off": int(data["type_off"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            return None
+        raw_ai = data.get("ai_offs") or []
+        ai_offs = []
+        if isinstance(raw_ai, list):
+            for item in raw_ai:
+                try:
+                    off = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= off < BOBBER_CALIB_SCAN_LEN and off % 4 == 0:
+                    ai_offs.append(off)
+        layout["ai_offs"] = ai_offs
+        for key in ("active_off", "owner_off", "type_off"):
+            if not (0 <= layout[key] < BOBBER_CALIB_SCAN_LEN):
+                return None
+        return layout
+
+    def _save_cached_layout(self, layout):
+        if not self._layout_cache_path:
+            return
+        if layout is None:
+            try:
+                import os as _os
+
+                _os.remove(self._layout_cache_path)
+            except OSError:
+                pass
+            return
+        try:
+            with open(self._layout_cache_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "active_off": int(layout["active_off"]),
+                        "owner_off": int(layout["owner_off"]),
+                        "type_off": int(layout["type_off"]),
+                        "ai_offs": [int(x) for x in (layout.get("ai_offs") or [])],
+                    },
+                    fh,
+                )
+        except OSError:
+            pass
+
+    def _sample_idle_projectiles(self, exclude_ptrs: set, limit: int = 12):
+        """Blobs of other projectiles: mostly inactive, useful as zero-fill."""
+        arr = self._read_u32(self._projectile_static)
+        n = min(PROJECTILE_LIVE_SLOTS, max(0, self._read_u32(arr + 4)))
+        table = self._read_u32_table(arr + 8, n)
+        out = []
+        for slot in range(n):
+            ptr = int.from_bytes(table[slot * 4:slot * 4 + 4], "little")
+            if not (0x10000 < ptr < USER_SPACE_END) or ptr in exclude_ptrs:
+                continue
+            try:
+                data = self._read_bytes(ptr, BOBBER_CALIB_SCAN_LEN)
+            except RuntimeError:
+                continue
+            out.append(data)
+            if len(out) >= limit:
+                break
+        return out
+
+    @staticmethod
+    def _blob_has_bobber_type(blob: bytes) -> bool:
+        """True if a bobber item id sits at an aligned field, not whoAmI.
+
+        Slots 360-366 store whoAmI==slot at +0x04, which is also a bobber
+        type id and must not count as a bobber.
+        """
+        n = len(blob)
+        for off in range(0, n - 3, 4):
+            if off == HYP_WHOAMI_OFF:
+                continue
+            if int.from_bytes(blob[off:off + 4], "little") in BOBBER_TYPES:
+                return True
+        return False
+
+    @staticmethod
+    def _score_bobber_blob(blob: bytes, my_player: int) -> dict:
+        """Offsets inside one bobber object consistent with a bobber."""
+        n = len(blob)
+        type_offs = [
+            off
+            for off in range(0, n - 3, 4)
+            if off != HYP_WHOAMI_OFF
+            and int.from_bytes(blob[off:off + 4], "little") in BOBBER_TYPES
+        ]
+        owner_offs = [
+            off
+            for off in range(0, n - 3, 4)
+            if off != HYP_WHOAMI_OFF
+            and int.from_bytes(blob[off:off + 4], "little") == my_player
+        ]
+        active_offs = [off for off in range(n) if blob[off] != 0]
+        return {
+            "type_off": type_offs,
+            "owner_off": owner_offs,
+            "active_off": active_offs,
+        }
+
+    def _consensus_layout(self, scored: list, idle_blobs: list):
+        """Offsets shared by every bobber candidate; active must be 0 in idles.
+
+        Ties break by closeness to the known layout: a game update shifts
+        fields slightly, it does not reshuffle them randomly.
+        """
+
+        def common(key):
+            sets = [set(s[key]) for s in scored]
+            inter = set.intersection(*sets) if sets else set()
+            return sorted(inter)
+
+        def pick(cands, prior, aligned_only: bool = True):
+            if aligned_only:
+                cands = [off for off in cands if off % 4 == 0] or list(cands)
+            return min(cands, key=lambda off: (abs(off - prior), off))
+
+        type_cands = common("type_off")
+        owner_cands = common("owner_off")
+        active_cands = common("active_off")
+
+        def idle_zero_rate(off: int) -> float:
+            if not idle_blobs:
+                return 1.0
+            zeros = sum(1 for b in idle_blobs if off < len(b) and b[off] == 0)
+            return zeros / len(idle_blobs)
+
+        active_cands = [
+            off for off in active_cands if idle_zero_rate(off) >= 0.8
+        ]
+        if not type_cands or not owner_cands or not active_cands:
+            return None
+        return {
+            "type_off": pick(
+                type_cands, _DEFAULT_LAYOUT["type_off"]
+            ),
+            "owner_off": pick(
+                owner_cands, _DEFAULT_LAYOUT["owner_off"]
+            ),
+            "active_off": pick(
+                # active is a bool byte: it is not 4-aligned in general, so
+                # an aligned-only filter would drop the real offset in favour
+                # of a far-away aligned decoy.
+                active_cands, _DEFAULT_LAYOUT["active_off"], aligned_only=False
+            ),
+        }
+
+    def _try_layout_from_live_blobs(self) -> bool:
+        """Apply a layout from bobbers already in the water, if any."""
+        try:
+            entries = self._raw_projectile_blobs()
+        except RuntimeError:
+            return False
+        my_player = self._my_player_id()
+        scored = []
+        live_ptrs = set()
+        for slot, ptr, data in entries:
+            if not self._blob_has_bobber_type(data):
+                continue
+            if len(data) > HYP_ACTIVE_OFF and data[HYP_ACTIVE_OFF] == 0:
+                continue
+            s = self._score_bobber_blob(data, my_player)
+            if not s["type_off"]:
+                continue
+            scored.append(s)
+            live_ptrs.add(ptr)
+            self._phase(f"calib_live slot={slot}")
+        if not scored:
+            return False
+        idle = self._sample_idle_projectiles(live_ptrs)
+        layout = self._consensus_layout(scored, idle)
+        if layout is None:
+            return False
+        self._apply_bobber_layout(layout)
+        found = self._local_bobbers()
+        if not found:
+            self._apply_bobber_layout(None)
+            return False
+        self._phase("calib_ok live")
+        self._save_cached_layout(layout)
+        self._resolve_ai_offs_from_bobbers()
+        self.on_status("calibrated")
+        return True
+
+    def _calibrate_bobber_layout(self) -> bool:
+        """Find shifted Projectile field offsets from manual casts.
+
+        Terraria updates move fields inside Projectile, so the built-in
+        owner/active/type offsets cannot be trusted to select candidates.
+        Projectile objects are a reused pool: the bobber is almost never a
+        new pointer. The window snapshots which blobs already contain a
+        bobber type id; a candidate is a blob that newly gains one and
+        keeps it for BOBBER_CALIB_STABLE_FRAMES polls. Offsets then come
+        from content: type in BOBBER_TYPES, owner == myPlayer, active is a
+        byte set here but zero in idle projectiles.
+        """
+        cached = self._load_cached_layout() or _HOOK_CACHE.get("bobber_layout")
+        if cached:
+            self._phase(f"calib_cached {cached}")
+            self._apply_bobber_layout(cached)
+            found = self._local_bobbers()
+            if found:
+                self._phase("calib_cached_ok")
+                self._resolve_ai_offs_from_bobbers(found)
+                return True
+            self._phase("calib_cached_stale")
+            self._apply_bobber_layout(None)
+            self._save_cached_layout(None)
+        found = self._local_bobbers()
+        if found:
+            try:
+                data = self._read_bytes(found[0][1], BOBBER_OBJ_PREFIX)
+                proj_type = int.from_bytes(
+                    data[OFF_PROJ_TYPE:OFF_PROJ_TYPE + 4], "little"
+                )
+            except RuntimeError:
+                return False
+            if proj_type in BOBBER_TYPES:
+                self._phase("calib_skip default_layout_ok")
+                self._resolve_ai_offs_from_bobbers(found)
+                return True
+
+        if self._try_layout_from_live_blobs():
+            return True
+
+        self.on_status("calibrating")
+        self._phase("calib_start")
+        try:
+            baseline_entries = self._raw_projectile_blobs()
+        except RuntimeError:
+            baseline_entries = None
+        if baseline_entries is None:
+            self._phase("calib_timeout no_baseline")
+            if not self.stop_event.is_set():
+                self.on_status("calibrate_timeout")
+            return False
+        baseline_bobber_ptrs = {
+            ptr
+            for _, ptr, data in baseline_entries
+            if self._blob_has_bobber_type(data)
+        }
+        # Calibration is intentionally passive.  The user supplies this one
+        # cast after the prompt; clicking while the previous rod animation is
+        # still active may be ignored and leaves no bobber to calibrate.
+        deadline = time.monotonic() + BOBBER_CALIB_TIMEOUT_S
+        scored: list = []
+        scored_ptrs: set = set()
+        stable_hits: dict = {}
+        idle_blobs: list = []
+        first_hit_at = None
+        while (
+            time.monotonic() < deadline
+            and not self.stop_event.is_set()
+            and len(scored) < BOBBER_CALIB_MAX_CANDIDATES
+        ):
+            try:
+                entries = self._raw_projectile_blobs()
+            except RuntimeError:
+                time.sleep(CALIB_POLL_S)
+                continue
+            for slot, ptr, data in entries:
+                if ptr in baseline_bobber_ptrs or ptr in scored_ptrs:
+                    continue
+                if not self._blob_has_bobber_type(data):
+                    stable_hits[ptr] = 0
+                    continue
+                hits = stable_hits.get(ptr, 0) + 1
+                stable_hits[ptr] = hits
+                if hits != BOBBER_CALIB_STABLE_FRAMES:
+                    continue
+                if len(scored) >= BOBBER_CALIB_MAX_CANDIDATES:
+                    break
+                s = self._score_bobber_blob(data, self._my_player_id())
+                if not s["type_off"]:
+                    stable_hits[ptr] = 0
+                    continue
+                scored.append(s)
+                scored_ptrs.add(ptr)
+                self._phase(f"calib_candidate slot={slot}")
+                if first_hit_at is None:
+                    first_hit_at = time.monotonic()
+            if not idle_blobs and scored:
+                idle_blobs = self._sample_idle_projectiles(scored_ptrs)
+            if (
+                scored
+                and first_hit_at is not None
+                and time.monotonic() - first_hit_at > BOBBER_CALIB_EXTRA_S
+            ):
+                # One cast is enough: extra waiting risks reeling the line.
+                break
+            time.sleep(CALIB_POLL_S)
+
+        if self.stop_event.is_set():
+            self._phase("calib_aborted")
+            return False
+        if not scored:
+            self._phase("calib_timeout no_candidates")
+            self.on_status("calibrate_timeout")
+            return False
+        layout = self._consensus_layout(scored, idle_blobs)
+        if layout is None:
+            self._phase("calib_failed no_consensus")
+            if not self.stop_event.is_set():
+                self.on_status("calibrate_timeout")
+            return False
+        self._apply_bobber_layout(layout)
+        found = self._local_bobbers()
+        if not found:
+            self._phase("calib_rejected no_bobber_after_apply")
+            self._apply_bobber_layout(None)
+            self._save_cached_layout(None)
+            return False
+        self._phase("calib_ok")
+        self._save_cached_layout(layout)
+        self._resolve_ai_offs_from_bobbers()
+        self.on_status("calibrated")
+        return True
 
     def _emit_hook_error(self, reason: str, candidates: list):
         if not self._probe_enabled or not self._probe_log_path:
@@ -881,17 +1378,36 @@ class MemoryBot:
     def _is_projectile_array(self, arr: int) -> bool:
         """length 1000/1001 with a real, populated live-object range.
 
-        Rejects decoy static slots that share the length but are otherwise
-        empty (see _projectile_array_richness docstring).
+        Length-1000 tables with many pointers but no whoAmI matches are
+        decoys (live dump: 379 ptrs, 0 bobbers). Length-1001 with whoAmI
+        matches is Main.projectile even if currently empty of live objects.
         """
         richness = self._projectile_array_richness(arr)
         if richness is None:
             return False
         non_null, who_matches = richness
-        return (
-            non_null >= PROJECTILE_MIN_NON_NULL
-            and who_matches >= PROJECTILE_MIN_WHOAMI_MATCH
-        )
+        try:
+            length = self._read_u32(arr + 4)
+        except RuntimeError:
+            return False
+        if who_matches >= PROJECTILE_MIN_WHOAMI_MATCH:
+            return True
+        if length == PROJECTILE_ARRAY_LEN and non_null >= PROJECTILE_MIN_NON_NULL:
+            return True
+        return False
+
+    def _projectile_header_ok(self, slot: int) -> bool:
+        """True if the static points at a length-1000/1001 CLR array header."""
+        if not slot:
+            return False
+        try:
+            arr = self._read_u32(slot)
+            if not (0x10000 < arr < USER_SPACE_END):
+                return False
+            length = self._read_u32(arr + 4)
+        except RuntimeError:
+            return False
+        return length in PROJECTILE_ARRAY_LENS
 
     def _projectile_static_ok(self, slot: int) -> bool:
         if not slot:
@@ -900,16 +1416,22 @@ class MemoryBot:
             arr = self._read_u32(slot)
         except RuntimeError:
             return False
-        return self._is_projectile_array(arr)
+        if self._is_projectile_array(arr):
+            return True
+        try:
+            return self._read_u32(arr + 4) == PROJECTILE_ARRAY_LEN
+        except RuntimeError:
+            return False
 
     def _projectile_static_from_player(self, player_static: int) -> int:
         if not player_static:
             return 0
-        slot = player_static - PROJ_STATIC_OFF_FROM_PLAYER
-        if slot < 0x10000:
-            return 0
-        if self._projectile_static_ok(slot):
-            return slot
+        for off in PROJ_STATIC_OFFS_FROM_PLAYER:
+            slot = player_static - off
+            if slot < 0x10000:
+                continue
+            if self._projectile_header_ok(slot):
+                return slot
         return 0
 
     def _projectile_array_score(self, arr: int) -> int:
@@ -949,18 +1471,22 @@ class MemoryBot:
             if richness is None:
                 continue
             non_null, who_matches = richness
-            if (
-                non_null < PROJECTILE_MIN_NON_NULL
-                or who_matches < PROJECTILE_MIN_WHOAMI_MATCH
-            ):
+            try:
+                length = self._read_u32(arr + 4)
+            except RuntimeError:
                 continue
-            cands.append((slot, non_null, who_matches))
+            if who_matches < PROJECTILE_MIN_WHOAMI_MATCH and length != PROJECTILE_ARRAY_LEN:
+                continue
+            if non_null < 1 and who_matches < 1:
+                continue
+            cands.append((slot, non_null, who_matches, length))
         if not cands:
             return 0
         cands.sort(
             key=lambda c: (
-                -c[2],  # whoAmI==index matches first
-                -c[1],  # then non-null slots
+                0 if c[3] == PROJECTILE_ARRAY_LEN else 1,
+                -c[2],
+                -c[1],
                 abs(c[0] - around),
                 c[0],
             )
@@ -1204,13 +1730,13 @@ class MemoryBot:
         return bool(self._projectile_static)
 
     def _parse_bobber_prefix(self, data: bytes, slot: int, my_player: int) -> bool:
-        """Local fishing bobber: active==1, type at +0x7C, owner at +0x5C."""
+        """Local fishing bobber: active!=0, type at layout type_off, owner at owner_off."""
         if len(data) < OFF_PROJ_TYPE + 4:
             return False
         who = int.from_bytes(data[HYP_WHOAMI_OFF:HYP_WHOAMI_OFF + 4], "little")
         if who != slot:
             return False
-        if data[HYP_ACTIVE_OFF] != 1:
+        if data[HYP_ACTIVE_OFF] == 0:
             return False
         proj_type = int.from_bytes(
             data[OFF_PROJ_TYPE:OFF_PROJ_TYPE + 4], "little"
@@ -1233,7 +1759,7 @@ class MemoryBot:
             if not (0x10000 < ptr < USER_SPACE_END):
                 continue
             head = self._read_bytes(ptr, HYP_ACTIVE_OFF + 1)
-            if len(head) <= HYP_ACTIVE_OFF or head[HYP_ACTIVE_OFF] != 1:
+            if len(head) <= HYP_ACTIVE_OFF or head[HYP_ACTIVE_OFF] == 0:
                 continue
             data = self._read_bytes(ptr, BOBBER_OBJ_PREFIX)
             if self._parse_bobber_prefix(data, slot, my_player):
@@ -1256,6 +1782,305 @@ class MemoryBot:
         self.on_status(f"safe_stop:{reason}")
         self.stop_event.set()
 
+    def _debug_log(self, msg: str):
+        if not self._debug_path:
+            return
+        line = f"{time.monotonic() - self._t0:+.3f} {msg}\n"
+        try:
+            with self._debug_lock:
+                with open(self._debug_path, "a", encoding="utf-8") as fh:
+                    fh.write(line)
+        except OSError:
+            pass
+
+    def _sanitize_start(self):
+        """Calibrate bobber offsets, verify anim if the water is empty, cast.
+
+        A live bobber skips the first cast. rolledItemDrop is not zeroed:
+        the game restores that field, and dunk detection does not need it.
+        """
+        try:
+            bobbers = self._local_bobbers()
+        except RuntimeError:
+            return
+        if bobbers:
+            self._bobber_verified_layout = True
+            self._resolve_ai_offs_from_bobbers(bobbers)
+        elif bobbers is not None:
+            self._bobber_verified_layout = self._calibrate_bobber_layout()
+            if self._bobber_verified_layout:
+                bobbers = self._local_bobbers()
+                if bobbers:
+                    self._resolve_ai_offs_from_bobbers(bobbers)
+        if self._bobber_verified_layout:
+            self._check_anim_detector()
+        if self.stop_event.is_set():
+            return
+        try:
+            bobbers = self._local_bobbers()
+        except RuntimeError:
+            bobbers = None
+        if bobbers:
+            self._phase(f"sanitize_bobber_present n={len(bobbers)}")
+            return
+        if not self.aim_client or self.stop_event.is_set():
+            if bobbers is None:
+                self._phase("sanitize_no_verify")
+            return
+        self._phase("initial_cast")
+        if not self._recast_until_bobber():
+            self._phase("initial_cast_failed")
+            self.on_status("recast_failed")
+
+    def _pause_then_recast(self) -> bool:
+        """Catch/skip delay then a guarded recast. False if stopped."""
+        self._phase(
+            f"pause_before_recast "
+            f"catch={CATCH_DELAY_S}s interval={RECAST_INTERVAL_S}s"
+        )
+        self._sleep_interruptible(CATCH_DELAY_S)
+        self._sleep_interruptible(RECAST_INTERVAL_S)
+        if self.stop_event.is_set():
+            return False
+        self._wait_animation_clear(RECAST_ANIM_TIMEOUT_S)
+        if self.stop_event.is_set():
+            return False
+        self._phase("recast_click")
+        return self._recast_until_bobber()
+
+    def _clr_float_array_len(self, ptr: int) -> int:
+        """Element count if ptr looks like a small CLR SzArray<float>, else 0.
+
+        ai/localAI are float[3] on 1.4.5.8; an exact `== 2` test matched
+        nothing and left bite detection permanently dead.
+        """
+        if not (0x10000 < ptr < USER_SPACE_END):
+            return 0
+        try:
+            length = self._read_u32(ptr + CLR_SZARRAY_LEN_OFF)
+        except RuntimeError:
+            return 0
+        return int(length) if length in AI_ARRAY_LENS else 0
+
+    def _is_clr_float_array(self, ptr: int) -> bool:
+        return self._clr_float_array_len(ptr) > 0
+
+    def _read_f32(self, addr: int) -> float:
+        raw = self._read_bytes(addr, 4)
+        if len(raw) < 4:
+            raise RuntimeError("short_f32")
+        return struct.unpack("<f", raw)[0]
+
+    def _ai_pair_at(self, array_ptr: int):
+        """(ai[0], ai[AI_DUNK_INDEX]) from a CLR float[] , or None."""
+        length = self._clr_float_array_len(array_ptr)
+        if length <= AI_DUNK_INDEX:
+            return None
+        try:
+            a0 = self._read_f32(array_ptr + CLR_SZARRAY_F0_OFF)
+            a1 = self._read_f32(
+                array_ptr + CLR_SZARRAY_F0_OFF + AI_DUNK_INDEX * 4
+            )
+        except RuntimeError:
+            return None
+        return (a0, a1)
+
+    def _scan_ai_array_offs(self, blob: bytes) -> list:
+        """Field offsets on a projectile blob that point at ai-sized float[]."""
+        offs = []
+        n = len(blob)
+        for off in range(0, n - 3, 4):
+            ptr = int.from_bytes(blob[off:off + 4], "little")
+            if self._is_clr_float_array(ptr):
+                offs.append(off)
+        return offs
+
+    def _resolve_ai_offs_from_bobbers(self, bobbers=None) -> bool:
+        """Cache projectile field offsets that point at ai/localAI float[].
+
+        Retries are rate-limited: this runs from the poll loop, and an
+        unthrottled failure path re-read the object plus up to 64 pointers at
+        40 Hz while writing a log line every frame.
+        """
+        if self._ai_offs:
+            return True
+        now = time.monotonic()
+        if now < self._ai_offs_retry_at:
+            return False
+        self._ai_offs_retry_at = now + AI_OFFS_RETRY_S
+        if bobbers is None:
+            try:
+                bobbers = self._local_bobbers()
+            except RuntimeError:
+                bobbers = None
+        if not bobbers:
+            return False
+        _, ptr = bobbers[0]
+        try:
+            data = self._read_bytes(ptr, BOBBER_CALIB_SCAN_LEN)
+        except RuntimeError:
+            return False
+        if len(data) < 16:
+            return False
+        offs = self._scan_ai_array_offs(data)
+        if not offs:
+            self._ai_offs_fail_count += 1
+            if self._ai_offs_fail_count == 1:
+                self._phase("ai_offs none")
+            return False
+        self._ai_offs = offs
+        self._ai_offs_fail_count = 0
+        stored = dict(self.bobber_layout or _DEFAULT_LAYOUT)
+        stored["ai_offs"] = list(offs)
+        self.bobber_layout = stored
+        _HOOK_CACHE["bobber_layout"] = dict(stored)
+        self._save_cached_layout(stored)
+        self._phase("ai_offs " + ",".join(f"{o:#x}" for o in offs))
+        return True
+
+    def _bobber_ai1(self) -> Optional[float]:
+        """Lowest ai[AI_DUNK_INDEX] across the bobber's ai-sized float arrays."""
+        pair = self._bobber_ai_pair()
+        if pair is None:
+            return None
+        return pair[1]
+
+    def _bobber_ai_pair(self):
+        """(ai0, ai1, field_off) for the array with the most-negative ai1.
+
+        Both ai (+0x40) and localAI (+0x44) are float[3] and indistinguishable
+        by shape, so every candidate is read and the most negative wins: only
+        ai[1] goes below zero, and it does so exactly while the bobber is
+        pulled under.
+        """
+        try:
+            bobbers = self._local_bobbers()
+        except RuntimeError:
+            return None
+        if not bobbers:
+            return None
+        _, ptr = bobbers[0]
+        offs = self._ai_offs
+        if not offs:
+            self._resolve_ai_offs_from_bobbers(bobbers)
+            offs = self._ai_offs
+        best = None
+        for off in offs or ():
+            try:
+                array_ptr = self._read_u32(ptr + off)
+            except RuntimeError:
+                continue
+            pair = self._ai_pair_at(array_ptr)
+            if pair is None:
+                continue
+            if best is None or pair[1] < best[1]:
+                best = (pair[0], pair[1], off)
+        return best
+
+    def _bobber_dunking(self) -> bool:
+        """True while the local bobber's ai[1] is negative (a fish is pulling)."""
+        v = self._bobber_ai1()
+        return v is not None and v < 0.0
+
+    def _dunk_detect_ready(self) -> bool:
+        """True if the dunk signal has ever been readable."""
+        return bool(self._ai_offs) or self._ai_read_ok
+
+    def _next_bite(self) -> Optional[int]:
+        """rolledItemDrop of a fresh bite, or None.
+
+        Primary path is the bobber dunk (ai[1] < 0), latched so one dunk yields
+        one reel: a dunk lasts ~2s and the loop polls at 40 Hz.
+
+        If ai[1] cannot be read at all (a future field shift), the loop would
+        sit idle forever, so after DUNK_FALLBACK_AFTER_S it degrades to the
+        older rule: a change of rolledItemDrop is a bite. That field is sticky,
+        so the fallback re-arms only when it reads back as zero.
+        """
+        ai1 = self._bobber_ai1()
+        if ai1 is not None:
+            self._ai_read_ok = True
+            if self._dunk_fallback:
+                self._dunk_fallback = False
+                self._fallback_last_id = 0
+                self._phase("dunk_detect_recovered")
+            if ai1 >= 0.0:
+                self._dunk_latched = False
+                return None
+            if self._dunk_latched:
+                return None
+            self._dunk_latched = True
+            return self._read_rolled()
+
+        # ai[1] unreadable. An empty offset list is the real symptom; a missing
+        # bobber is not, so a dry spell must not trip the fallback.
+        if (
+            not self._dunk_fallback
+            and not self._ai_offs
+            and not self._ai_read_ok
+            and self._t0
+            and time.monotonic() - self._t0 >= DUNK_FALLBACK_AFTER_S
+        ):
+            self._dunk_fallback = True
+            self._phase("dunk_fallback_on rolled_id_mode")
+            self.on_status("dunk_unavailable")
+        if not self._dunk_fallback:
+            return None
+        item_id = self._read_rolled()
+        if not item_id:
+            self._fallback_last_id = 0
+            return None
+        if item_id == self._fallback_last_id:
+            return None
+        self._fallback_last_id = item_id
+        return item_id
+
+    def _clear_bite_latch(self):
+        """Allow the next dunk to register."""
+        self._dunk_latched = False
+
+    def _check_anim_detector(self):
+        """Warn once if itemAnimation never rises after a real click (offset drift).
+
+        On 1.4.5.8 the Player offsets may have moved; a dead detector makes
+        every reel retry click actually yank the rod instead of reeling.
+        Must run before any bobber is in the water: the probe click is a real
+        use and would reel an existing line.
+        """
+        if not self.aim_client or self.stop_event.is_set():
+            return
+        bobbers = self._local_bobbers()
+        if bobbers:
+            return
+        hwnd = self._find_terraria_hwnd()
+        if not hwnd:
+            return
+        self._aim_cursor(hwnd)
+        self._sleep_interruptible(AIM_SETTLE_S)
+        self._anim_ever_rose = False
+        before = self._item_animation()
+        self._send_mouse(win32con.MOUSEEVENTF_LEFTDOWN)
+        try:
+            deadline = time.monotonic() + CLICK_HOLD_S
+            first = True
+            while time.monotonic() < deadline and not self.stop_event.is_set():
+                self._write_use_item(1, edge=first)
+                first = False
+                if self._item_animation() != before:
+                    return
+                time.sleep(USE_ITEM_PULSE_S)
+        finally:
+            self._send_mouse(win32con.MOUSEEVENTF_LEFTUP)
+            self._write_use_item(0)
+        time.sleep(0.1)
+        if self._bobber_verified_reel:
+            # A bobber-confirmed reel already proved clicks work; a stale
+            # itemAnimation offset must not raise a scary false alarm.
+            return
+        if not self.stop_event.is_set() and not self._anim_ever_rose:
+            self._phase("anim_dead")
+            self.on_status("anim_dead")
+
     def _log_rolled(self, value: int):
         if value == self._last_logged_rolled:
             return
@@ -1263,8 +2088,57 @@ class MemoryBot:
         self._last_logged_rolled = value
         self._phase(f"rolled {prev}->{value}")
 
+    def _probe_failed_fishing_flag(self):
+        """One-shot: dump bytes around rolledItemDrop on the first bite.
+
+        Terraria's FishingAttempt keeps failedFishing next to rolledItemDrop;
+        if a stable bool shows up in this window it can later distinguish a
+        snapped line from a landed catch. Diagnostic only, logged to phases.
+        """
+        if self._failed_probe_done or not self._rolled_ptr:
+            return
+        self._failed_probe_done = True
+        try:
+            blob = self._read_bytes(self._rolled_ptr, 16)
+        except RuntimeError:
+            return
+        nonzero = [
+            f"+{off:#x}={blob[off]}"
+            for off in range(4, 16)
+            if blob[off] not in (0,)
+        ]
+        self._phase(f"failed_flag_probe rolled+16B nonzero={nonzero}")
+
+    def _log_hook_addrs(self):
+        layout = self.bobber_layout or _DEFAULT_LAYOUT
+        self._phase(
+            f"hook_addrs player={self._player_static:#x} "
+            f"proj={self._projectile_static:#x} "
+            f"ctx={self._context_static_addr:#x} "
+            f"rolled={self._rolled_ptr:#x} "
+            f"myplayer={self._my_player_id()} "
+            f"type@{int(layout['type_off']):#x} "
+            f"owner@{int(layout['owner_off']):#x} "
+            f"active@{int(layout['active_off']):#x} "
+            f"ai_offs={','.join(f'{o:#x}' for o in self._ai_offs) or '-'}"
+        )
+
+    def _refresh_rolled_ptr(self) -> bool:
+        """Re-resolve rolledItemDrop from Projectile._context each poll."""
+        if not self._context_static_addr:
+            return bool(self._rolled_ptr)
+        ctx = self._read_u32(self._context_static_addr)
+        if not ctx:
+            return False
+        self._rolled_ptr = ctx + ROLLED_ITEM_DROP_OFF
+        return True
+
     def _read_rolled(self) -> int:
         try:
+            self._refresh_rolled_ptr()
+            if not self._rolled_ptr:
+                self._log_rolled(0)
+                return 0
             value = self._read_u32(self._rolled_ptr)
         except RuntimeError:
             if self.stop_event.is_set():
@@ -1277,6 +2151,7 @@ class MemoryBot:
                 self._log_rolled(0)
                 return 0
             try:
+                self._refresh_rolled_ptr()
                 value = self._read_u32(self._rolled_ptr)
             except RuntimeError:
                 self._log_rolled(0)
@@ -1285,14 +2160,19 @@ class MemoryBot:
         return value
 
     def _zero_rolled(self):
-        if not self.process_handle or not self._rolled_ptr:
-            return
-        zero = (ctypes.c_ubyte * 4)(0, 0, 0, 0)
-        n = ctypes.c_size_t(0)
-        WriteProcessMemory(
-            self.process_handle, ctypes.c_void_p(self._rolled_ptr), zero, 4,
-            ctypes.byref(n),
-        )
+        prev = int(self._last_logged_rolled or 0)
+        if self.process_handle:
+            try:
+                self._refresh_rolled_ptr()
+            except RuntimeError:
+                pass
+        if self.process_handle and self._rolled_ptr:
+            zero = (ctypes.c_ubyte * 4)(0, 0, 0, 0)
+            n = ctypes.c_size_t(0)
+            WriteProcessMemory(
+                self.process_handle, ctypes.c_void_p(self._rolled_ptr), zero, 4,
+                ctypes.byref(n),
+            )
         self._log_rolled(0)
 
     def _find_terraria_hwnd(self) -> int:
@@ -1507,11 +2387,10 @@ class MemoryBot:
         if not player:
             return
         self._write_u8(player + OFF_CONTROL_USE_ITEM, value)
-        if not value:
-            return
-        # Just-pressed only on the first pulse. Repeating the edge while
-        # itemAnimation stays 0 (fishing cast) starts a second use: reel.
-        self._write_u8(player + OFF_RELEASE_USE_ITEM, 1 if edge else 0)
+        # releaseUseItem must mirror controlUseItem: leaving it set after a
+        # zeroed controlUseItem makes the next frame see a stale just-pressed
+        # edge and start a second use (reel) instead of a cast.
+        self._write_u8(player + OFF_RELEASE_USE_ITEM, 1 if (value and edge) else 0)
 
     def _write_control_use_item(self, value: int):
         """Set controlUseItem only. Recast must not touch releaseUseItem."""
@@ -1587,98 +2466,205 @@ class MemoryBot:
             return None
         return bool(found)
 
-    def _recast_until_bobber(self) -> bool:
-        """Atomic recast clicks until a local bobber exists, or clicks are exhausted."""
-        can_verify = self._ensure_projectile_array()
-        for attempt in range(RECAST_MAX_CLICKS):
-            if self.stop_event.is_set():
-                return False
-            if can_verify:
-                found = self._local_bobbers()
-                if found:
-                    return True
-            if not self._recast_click():
-                return False
-            if not can_verify:
-                return True
-            appeared = self._wait_for_bobber(BOBBER_WAIT_S)
-            if appeared is None:
-                return True
-            if appeared:
-                return True
-            if attempt + 1 < RECAST_MAX_CLICKS:
-                self.on_status("recast_failed")
-                self._sleep_interruptible(RECAST_RETRY_PAUSE_S)
-        if can_verify:
+    def _wait_for_stable_bobber(self, appear_s: float) -> Optional[bool]:
+        """Wait for a bobber and confirm it survives a RECAST_STABLE_S window.
+
+        False means no bobber appeared at all, so one retry is safe. None
+        means verification failed *or* a bobber appeared and vanished; both
+        cases must suppress a second click because it could reel a delayed
+        fresh cast back in.
+        """
+        appeared = self._wait_for_bobber(appear_s)
+        if appeared is not True:
+            return appeared
+        deadline = time.monotonic() + RECAST_STABLE_S
+        while time.monotonic() < deadline and not self.stop_event.is_set():
             found = self._local_bobbers()
-            if found:
-                return True
-        self.on_status("recast_failed")
+            if found is None:
+                return None
+            if not found:
+                self._phase("bobber_vanished_after_cast")
+                return None
+            time.sleep(RECAST_POLL_S)
         return True
 
-    def _recast_click(self) -> bool:
-        """One-shot cast: one releaseUseItem edge and an atomic LMB click.
+    def _recast_until_bobber(self) -> bool:
+        """Send exactly one recast click; stale Projectile state is ignored."""
+        if self.stop_event.is_set():
+            return False
+        return self._recast_click()
 
-        Do not sleep between DOWN and UP: Windows timer sleep of 16 ms is
-        ~31 ms, two frames, and the second use reels the new bobber.
+    def _player_frame_tick(self) -> Optional[int]:
+        """Return the observed multiplayer Player update counter, if readable."""
+        player = self.local_player_ptr()
+        if not player:
+            return None
+        try:
+            return self._read_u32(player + OFF_PLAYER_FRAME_TICK)
+        except RuntimeError:
+            return None
+
+    def _wait_for_player_frame_tick(
+        self, previous: int, timeout_s: float, pulse=None,
+    ) -> tuple[Optional[int], int]:
+        """Wait for one Player update, optionally keeping controlUseItem high."""
+        deadline = time.monotonic() + timeout_s
+        reads = 0
+        while time.monotonic() < deadline and not self.stop_event.is_set():
+            if pulse is not None:
+                pulse()
+            tick = self._player_frame_tick()
+            reads += 1
+            if tick is None:
+                return None, reads
+            if tick != previous:
+                return tick, reads
+        return None, reads
+
+    def _recast_click(self) -> bool:
+        """One-shot cast: LEFTDOWN for exactly one observed Player update.
+
+        An atomic DOWN+UP in one SendInput is 0 ms and Terraria often
+        ignores it. A Windows-clock sleep can span two game frames and make
+        the second use reel a fresh bobber.  Synchronize the hold to the
+        multiplayer Player update counter instead.
+        Recast must not pulse releaseUseItem: that edge starts a second
+        use and reels the fresh bobber.
         """
         if not self.aim_client:
             if not self.stop_event.is_set():
                 self._safe_stop("no_aim")
             return False
-        self._ensure_terraria_focused()
         hwnd = self._find_terraria_hwnd()
+        if not hwnd:
+            self._phase("recast_blocked window_not_found")
+            return False
+        # Do not activate, restore, or click into a minimized/inactive game.
+        # A paused game has no safe frame in which to consume this click, and
+        # foreground stealing can unexpectedly restore a minimized window.
+        try:
+            iconic = int(bool(win32gui.IsIconic(hwnd)))
+            visible = int(bool(win32gui.IsWindowVisible(hwnd)))
+            foreground = int(win32gui.GetForegroundWindow() == hwnd)
+        except Exception:
+            iconic = visible = foreground = -1
+        if iconic and self._restore_minimized_window:
+            if not self._ensure_terraria_focused():
+                self._phase("recast_blocked window_restore_failed")
+                return False
+            hwnd = self._find_terraria_hwnd()
+            if not hwnd:
+                self._phase("recast_blocked window_not_found_after_restore")
+                return False
+            try:
+                iconic = int(bool(win32gui.IsIconic(hwnd)))
+                visible = int(bool(win32gui.IsWindowVisible(hwnd)))
+                foreground = int(win32gui.GetForegroundWindow() == hwnd)
+            except Exception:
+                iconic = visible = foreground = -1
+        if iconic or visible == 0 or foreground == 0:
+            self._phase(
+                f"recast_blocked window_not_ready iconic={iconic} "
+                f"visible={visible} foreground={foreground}"
+            )
+            return False
         if hwnd:
             self._aim_cursor(hwnd)
             self._sleep_interruptible(AIM_SETTLE_S)
+            # The window can become inactive while the cursor settles. Check
+            # again immediately before the first physical input.
+            try:
+                if (
+                    win32gui.IsIconic(hwnd)
+                    or not win32gui.IsWindowVisible(hwnd)
+                    or win32gui.GetForegroundWindow() != hwnd
+                ):
+                    self._phase("recast_blocked window_changed")
+                    return False
+            except Exception:
+                pass
         if self.stop_event.is_set():
             self._lmb_release()
             return False
         if self._probe is not None and self._probe_enabled:
             self._probe.request_recast()
-        self._write_use_item(1, edge=True)
-        self._send_mouse_click()
-        self._write_use_item(0)
-        if self.stop_event.is_set():
+        tick_before = self._player_frame_tick()
+        if tick_before is None:
+            self._phase("recast_blocked tick_unavailable")
+            return False
+        tick_down, align_reads = self._wait_for_player_frame_tick(
+            tick_before, RECAST_TICK_TIMEOUT_S,
+        )
+        if tick_down is None:
+            self._phase(
+                f"recast_blocked tick_align_timeout tick={tick_before} "
+                f"reads={align_reads}"
+            )
+            return False
+        self.on_status("initial_cast")
+        down_sent = self._send_mouse(win32con.MOUSEEVENTF_LEFTDOWN)
+        pulses = 0
+        up_sent = False
+        tick_up = None
+        hold_reads = 0
+
+        def pulse_control() -> None:
+            nonlocal pulses
+            # Terraria copies its mouse state over controlUseItem every
+            # frame. Keep this flag asserted for the entire one-frame hold,
+            # but never write releaseUseItem: that edge would turn a fresh
+            # cast into an immediate reel.
+            self._write_control_use_item(1)
+            pulses += 1
+
+        hold_started = time.monotonic()
+        try:
+            tick_up, hold_reads = self._wait_for_player_frame_tick(
+                tick_down, RECAST_TICK_TIMEOUT_S, pulse=pulse_control,
+            )
+        finally:
+            up_sent = self._send_mouse(win32con.MOUSEEVENTF_LEFTUP)
+            self._write_control_use_item(0)
+        held_ms = (time.monotonic() - hold_started) * 1000.0
+        if tick_up is None:
+            self._phase(
+                f"recast_blocked tick_hold_timeout tick={tick_down} "
+                f"reads={hold_reads} held_ms={held_ms:.1f} "
+                f"down={int(down_sent)} up={int(up_sent)} pulses={pulses}"
+            )
+        if self.stop_event.is_set() or tick_up is None:
             return False
         return True
 
-    def _reel_until_started(self) -> bool:
-        """Reel clicks until itemAnimation rises, or REEL_MAX_CLICKS is exhausted."""
-        if not self.aim_client:
-            return False
-        self._ensure_terraria_focused()
-        for attempt in range(REEL_MAX_CLICKS):
-            if self.stop_event.is_set():
-                return False
-            self._phase(f"reel_click attempt={attempt + 1}/{REEL_MAX_CLICKS}")
-            if self._click_left("reel"):
-                return True
-            if attempt + 1 < REEL_MAX_CLICKS:
-                self._sleep_interruptible(REEL_RETRY_PAUSE_S)
-        return False
-
     def _sleep_interruptible(self, seconds: float):
         deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline and not self.stop_event.is_set():
-            time.sleep(min(0.05, deadline - time.monotonic()))
+        while not self.stop_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
 
     def _phase(self, msg: str):
-        return
+        self._debug_log(f"phase {msg}")
 
     def _item_animation(self) -> int:
         try:
             player = self._local_player()
             if not player:
                 return 0
-            return self._read_u32(player + OFF_ITEM_ANIMATION)
+            value = self._read_u32(player + OFF_ITEM_ANIMATION)
+            if value > 0:
+                self._anim_ever_rose = True
+            return value
         except RuntimeError:
             return 0
 
     def _animation_rose(self, before: int, anim: int) -> bool:
         return (before == 0 and anim != 0) or anim > before
 
-    def _wait_animation_clear(self, timeout_s: float = 1.2) -> bool:
+    def _wait_animation_clear(self, timeout_s: float = None) -> bool:
+        if timeout_s is None:
+            timeout_s = WAIT_ANIM_CLEAR_S
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline and not self.stop_event.is_set():
             if self._item_animation() == 0:

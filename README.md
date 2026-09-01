@@ -10,11 +10,13 @@ Use the default **32-bit Steam** build. Do not add `-autoarch` (that starts 64-b
 
 ![Bot in use](docs/demo.gif)
 
-## Warning
+## Requirements and limitations
 
-If FPS dips, a recast click can miss a frame. The bot waits about a second for the bobber and will not click again if one is already out.
+The bot supports **multiplayer only**. Single-player is not supported.
 
-The game cannot run in the background: a click always brings Terraria back as the active application. There is no adequate alternative for running the game in the background with the bot.
+Terraria must stay visible and in the foreground. By default the bot stops without sending a click when the game is minimized or inactive. The **Restore minimized Terraria before recasting** setting can opt in to restoring a minimized game; it does not activate an ordinary inactive window.
+
+Recast is one physical left-click, held for one observed game update. This avoids both missed short clicks and a second use that would reel the fresh bobber back in; its duration adapts to the game's update rate rather than a fixed Windows timer.
 
 ## Download / Run
 
@@ -33,14 +35,14 @@ Running from source is optional — see [From source](#from-source-optional).
 3. Open the **Catch** tab. Tick items, use presets (Fish / Quest / Crates), or **Select All**. Start needs a non-empty list.
 4. Click **Start**. Wait until the log says the hook was found.
 5. Aim at the water in Terraria and **cast once**. The bot stores that point. **Cast point** clears it so you can set it again.
-6. Leave Terraria in the foreground. The cursor will move to the saved point on each reel/recast. Run Terraria and the bot at the **same privilege level** (both as a normal user, or both as administrator). Otherwise Windows can block `SendInput` while memory reads still work.
+6. Leave Terraria visible and in the foreground. By default the bot stops rather than restore a minimized window or click an inactive game; the optional **Restore minimized Terraria before recasting** setting changes only the minimized-window behavior. The cursor will move to the saved point on each reel/recast. Run Terraria and the bot at the **same privilege level** (both as a normal user, or both as administrator). Otherwise Windows can block `SendInput` while memory reads still work.
 7. **Stop** ends the hook.
 
 Language, theme, window mode, auto-drink, and the Quick Buff key are on the **Settings** tab.
 
-### Known limitation
+### Input safety
 
-Reel retries until `itemAnimation` starts (the first click often misses). Recast is a **single** click: a fishing cast does not raise `itemAnimation`, and a second click would reel the line back. If the log shows reel/focus failures, check the cast point and that the game and bot share the same privilege level.
+Reel retries until `itemAnimation` starts (the first click can miss). Recast is a **single** click: a fishing cast does not raise `itemAnimation`, and another use would reel the line back. If fishing stops, check that Terraria is foreground, the cast point is valid, and the game and bot share the same privilege level.
 
 ## Stack
 
@@ -57,7 +59,7 @@ Reel retries until `itemAnimation` starts (the first click often misses). Recast
 |------|------|
 | [`src/Fishing bot.py`](src/Fishing%20bot.py) | Entry: load prefs/stats, start the Qt app |
 | [`src/gui/`](src/gui/) | PySide6 GUI: Start / Stop / Cast point, catch list, statistics, settings |
-| [`src/memory_bot.py`](src/memory_bot.py) | JIT scan for `FishingCheck`, read `rolledItemDrop`, save aim, click to reel/recast |
+| [`src/memory_bot.py`](src/memory_bot.py) | JIT scan for `FishingCheck`, detect a bobber dunk, save aim, click to reel/recast |
 | [`src/projectile_probe.py`](src/projectile_probe.py) | Optional debug log (`projectile_probe.jsonl`) |
 | [`src/icon.ico`](src/icon.ico) | Window and exe icon (pixel phoenix / flame) |
 | [`src/data/catches.json`](src/data/catches.json) | Terraria item IDs and names |
@@ -69,9 +71,9 @@ Flow:
 
 ```
 Start → attach to Terraria.exe
-  → scan JIT for FishingCheck → Projectile._context.FishingAttempt.rolledItemDrop
+  → scan JIT for FishingCheck → detect the local bobber dunk
   → user casts once → cursor position saved (client coordinates)
-  → whitelist bite → short left-click at that point (reel, then recast)
+  → whitelisted bite → left-click at that point (reel, then one-update recast)
 Log + statistics.json
 ```
 

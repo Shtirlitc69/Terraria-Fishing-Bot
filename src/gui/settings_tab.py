@@ -75,6 +75,14 @@ class SettingsTab(QWidget):
         self._probe = QCheckBox(self._i18n.t("projectile_probe"), self)
         self._probe.toggled.connect(self._on_switch)
 
+        self._debug = QCheckBox(self._i18n.t("debug_log"), self)
+        self._debug.toggled.connect(self._on_switch)
+
+        self._restore_minimized = QCheckBox(
+            self._i18n.t("restore_minimized_window"), self
+        )
+        self._restore_minimized.toggled.connect(self._on_switch)
+
         self._buff_label = QLabel(self._i18n.t("quick_buff_key"))
         self._buff = QLineEdit(self)
         self._buff.setMaxLength(4)
@@ -99,6 +107,8 @@ class SettingsTab(QWidget):
         layout.addWidget(self._drink_panel)
         layout.addSpacing(8)
         layout.addWidget(self._probe)
+        layout.addWidget(self._debug)
+        layout.addWidget(self._restore_minimized)
         layout.addSpacing(12)
         layout.addWidget(self._buff_label)
         layout.addWidget(self._buff, 0, Qt.AlignmentFlag.AlignLeft)
@@ -151,6 +161,10 @@ class SettingsTab(QWidget):
         self._watch_crate.setChecked(watch == WATCH_CRATE)
         self._drink_panel.setVisible(self._auto_drink.isChecked())
         self._probe.setChecked(bool(self._prefs.get("projectile_probe")))
+        self._debug.setChecked(bool(self._prefs.get("debug_log")))
+        self._restore_minimized.setChecked(
+            bool(self._prefs.get("restore_minimized_window"))
+        )
         self._buff.setText(self._prefs.get("quick_buff_key", "b"))
         self._filling = False
 
@@ -163,6 +177,8 @@ class SettingsTab(QWidget):
         self._watch_crate.setText(self._i18n.t("auto_drink_watch_crate"))
         self._watch_hint.setText(self._i18n.t("auto_drink_watch_hint"))
         self._probe.setText(self._i18n.t("projectile_probe"))
+        self._debug.setText(self._i18n.t("debug_log"))
+        self._restore_minimized.setText(self._i18n.t("restore_minimized_window"))
         self._buff_label.setText(self._i18n.t("quick_buff_key"))
         current_lang = self._language.currentData()
         current_mode = self._window.currentData()
@@ -185,6 +201,12 @@ class SettingsTab(QWidget):
 
     def probe_on(self):
         return self._probe.isChecked()
+
+    def debug_on(self):
+        return self._debug.isChecked()
+
+    def restore_minimized_window_on(self):
+        return self._restore_minimized.isChecked()
 
     def window_mode(self):
         data = self._window.currentData()

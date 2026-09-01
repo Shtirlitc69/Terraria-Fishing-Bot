@@ -32,4 +32,20 @@ Desktop.ini
 # Runtime data next to a local exe or repo root (keep src/ templates tracked)
 /preferences.json
 /statistics.json
-projectile_probe.jsonl
+/fishing_events.jsonl
+/fishing_log.txt
+/memory_bot_debug.log
+/projectile_probe.jsonl
+/bobber_layout.json
+/game_tick_probe.jsonl
+
+# Runtime diagnostics when launching directly from src/
+/src/fishing_events.jsonl
+/src/fishing_log.txt
+/src/memory_bot_debug.log
+/src/projectile_probe.jsonl
+/src/bobber_layout.json
+
+# Local Codex/agent tooling
+/.agents/
+/skills-lock.json

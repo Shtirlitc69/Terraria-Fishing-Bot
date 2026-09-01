@@ -15,6 +15,8 @@ DEFAULT_PREFERENCES = {
     "window_geometry": "1100x680",
     "cast_aim": None,
     "projectile_probe": False,
+    "debug_log": False,
+    "restore_minimized_window": False,
     "window_mode": "normal",
 }
 
@@ -94,6 +96,9 @@ def load_preferences(path):
         prefs.get("auto_drink_watch")
     )
     prefs["cast_aim"] = normalize_cast_aim(prefs.get("cast_aim"))
+    prefs["restore_minimized_window"] = bool(
+        prefs.get("restore_minimized_window")
+    )
     if prefs.get("language") not in ("en", "ru"):
         prefs["language"] = "en"
     if prefs.get("window_mode") not in _WINDOW_MODES:

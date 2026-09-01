@@ -1,5 +1,6 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence, QTextCursor
+from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -95,6 +96,7 @@ class FishingLog(QPlainTextEdit):
     def __init__(self, i18n, parent=None):
         super().__init__(parent)
         self._i18n = i18n
+        self._file_path = None
         self.setObjectName("fishingLog")
         self.setReadOnly(True)
         self.setUndoRedoEnabled(False)
@@ -118,10 +120,34 @@ class FishingLog(QPlainTextEdit):
         self._copy_action.setText(self._i18n.t("log_copy"))
         self._select_action.setText(self._i18n.t("log_select_all"))
 
+    def set_log_file(self, path):
+        """Persist every appended line to path; None disables the mirror."""
+        self._file_path = Path(path) if path else None
+
     def append_log(self, text: str):
         self.moveCursor(QTextCursor.MoveOperation.End)
         self.insertPlainText(text)
         self.moveCursor(QTextCursor.MoveOperation.End)
+        self._mirror_to_file(text)
+
+    def _mirror_to_file(self, text: str):
+        if not self._file_path:
+            return
+        try:
+            with open(self._file_path, "a", encoding="utf-8") as f:
+                f.write(text)
+        except OSError:
+            pass
+
+    def clear_log(self):
+        self.clear()
+        if not self._file_path:
+            return
+        try:
+            with open(self._file_path, "w", encoding="utf-8") as f:
+                f.write("")
+        except OSError:
+            pass
 
     def copy_selection(self):
         cursor = self.textCursor()
