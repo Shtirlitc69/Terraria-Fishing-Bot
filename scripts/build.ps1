@@ -9,6 +9,10 @@ $DistDir = Join-Path $Root ".build_dist"
 $PrefsBackup = Join-Path $BackupDir "preferences.json"
 $StatsBackup = Join-Path $BackupDir "statistics.json"
 
+# GitHub Actions starts from a clean checkout, where release\ does not exist.
+# Create the destination before moving the PyInstaller bundle into it.
+New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
+
 if (Test-Path (Join-Path $ReleaseDir "preferences.json")) {
     New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
     Move-Item (Join-Path $ReleaseDir "preferences.json") $PrefsBackup -Force
