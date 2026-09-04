@@ -134,6 +134,15 @@ pyinstaller --noconfirm --clean --distpath $DistDir --workpath .pyinstaller_buil
 
 Install-ReleaseBundle
 
+# The bundle includes defaults from src/, but the copies next to the exe are
+# user data. Put back the exact files moved aside before PyInstaller ran.
+if (Test-Path $PrefsBackup) {
+    Move-Item -LiteralPath $PrefsBackup -Destination (Join-Path $ReleaseDir "preferences.json") -Force
+}
+if (Test-Path $StatsBackup) {
+    Move-Item -LiteralPath $StatsBackup -Destination (Join-Path $ReleaseDir "statistics.json") -Force
+}
+
 $ExePath = Join-Path $ReleaseDir "Fishing bot.exe"
 if (-not (Test-Path $ExePath)) {
     throw "Build failed: $ExePath not found"

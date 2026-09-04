@@ -481,6 +481,11 @@ class MemoryBot:
         self._dunk_fallback = False
         self._fallback_last_id = 0
         self._dunk_latched = False
+        # A filtered bite is deliberately not reeled.  Keep watching its
+        # bobber: a missed bite normally leaves it in the water, while a
+        # snapped/despawned line needs one fresh cast.
+        self._skip_recast_pending = False
+        self._skip_bobber_missing_at = 0.0
         self._bot_lmb_depth = 0
         self._probe = None
         self._sig_match = 0
@@ -591,11 +596,39 @@ class MemoryBot:
                     self._emit_aim()
                     self._dunk_latched = False
                     self._fallback_last_id = 0
+                    self._skip_recast_pending = False
+                    self._skip_bobber_missing_at = 0.0
                     self._phase("aim_reset")
                     continue
                 if not self.aim_client:
                     time.sleep(self.poll_interval)
                     continue
+                if self._skip_recast_pending:
+                    # Do not infer that a missing array means a missing
+                    # bobber.  Input must stay fail-closed while memory is
+                    # unverifiable.
+                    bobbers = self._local_bobbers()
+                    if bobbers is None:
+                        time.sleep(self.poll_interval)
+                        continue
+                    if bobbers:
+                        self._skip_bobber_missing_at = 0.0
+                    else:
+                        now = time.monotonic()
+                        if not self._skip_bobber_missing_at:
+                            self._skip_bobber_missing_at = now
+                            self._phase("skip_bobber_missing")
+                        elif now - self._skip_bobber_missing_at >= RECAST_OLD_BOBBER_WAIT_S:
+                            self._skip_recast_pending = False
+                            self._skip_bobber_missing_at = 0.0
+                            self._clear_bite_latch()
+                            self._set_input_busy(True)
+                            try:
+                                if not self._pause_then_recast():
+                                    break
+                            finally:
+                                self._set_input_busy(False)
+                            continue
                 item_id = self._next_bite()
                 if item_id is None:
                     time.sleep(self.poll_interval)
@@ -607,11 +640,16 @@ class MemoryBot:
                 try:
                     if not allow:
                         self.on_status(f"bite:{item_id}:skip")
-                        self._phase("skip_reel")
-                        self._click_left("reel")
-                        self._clear_bite_latch()
-                        if not self._pause_then_recast():
-                            break
+                        if self._dunk_fallback:
+                            # In multiplayer fallback mode the client table
+                            # can be empty even while the visible bobber is
+                            # still in water. Never infer its disappearance
+                            # and never send a follow-up click for a skip.
+                            self._phase("skip_wait_rolled_fallback")
+                            continue
+                        self._phase("skip_wait_for_bobber")
+                        self._skip_recast_pending = True
+                        self._skip_bobber_missing_at = 0.0
                         continue
                     self._phase(f"reel_begin id={item_id}")
                     self._phase("reel_click attempt=1/1")
@@ -1807,6 +1845,12 @@ class MemoryBot:
             self._bobber_verified_layout = True
             self._resolve_ai_offs_from_bobbers(bobbers)
         elif bobbers is not None:
+            # Some multiplayer clients expose only an empty placeholder at
+            # the historical Main.projectile static. It cannot calibrate a
+            # bobber layout; do not click into a line we cannot see.
+            if self._projectile_has_live_entries() is False:
+                self._enable_rolled_fallback("empty_projectile_table")
+                return
             self._bobber_verified_layout = self._calibrate_bobber_layout()
             if self._bobber_verified_layout:
                 bobbers = self._local_bobbers()
@@ -2021,9 +2065,7 @@ class MemoryBot:
             and self._t0
             and time.monotonic() - self._t0 >= DUNK_FALLBACK_AFTER_S
         ):
-            self._dunk_fallback = True
-            self._phase("dunk_fallback_on rolled_id_mode")
-            self.on_status("dunk_unavailable")
+            self._enable_rolled_fallback("after_timeout")
         if not self._dunk_fallback:
             return None
         item_id = self._read_rolled()
@@ -2034,6 +2076,16 @@ class MemoryBot:
             return None
         self._fallback_last_id = item_id
         return item_id
+
+    def _enable_rolled_fallback(self, reason: str):
+        """Use rolledItemDrop transitions when dunk state is unavailable."""
+        if self._dunk_fallback:
+            return
+        self._dunk_fallback = True
+        # rolledItemDrop is sticky: the value present at startup is old state.
+        self._fallback_last_id = self._read_rolled()
+        self._phase(f"dunk_fallback_on {reason} rolled_id_mode")
+        self.on_status("dunk_unavailable")
 
     def _clear_bite_latch(self):
         """Allow the next dunk to register."""
@@ -2451,6 +2503,23 @@ class MemoryBot:
         except RuntimeError:
             return None
 
+    def _projectile_has_live_entries(self) -> Optional[bool]:
+        """Whether the resolved Projectile array contains a real object."""
+        if not self._ensure_projectile_array():
+            return None
+        try:
+            arr = self._read_u32(self._projectile_static)
+            length = self._read_u32(arr + 4)
+            n = min(PROJECTILE_LIVE_SLOTS, max(0, length))
+            table = self._read_u32_table(arr + 8, n)
+        except RuntimeError:
+            return None
+        for slot in range(n):
+            ptr = int.from_bytes(table[slot * 4:slot * 4 + 4], "little")
+            if 0x10000 < ptr < USER_SPACE_END:
+                return True
+        return False
+
     def _wait_for_bobber(self, timeout_s: float) -> Optional[bool]:
         """True if a local bobber appears. False if none. None if unverifiable."""
         deadline = time.monotonic() + timeout_s
@@ -2548,7 +2617,7 @@ class MemoryBot:
             foreground = int(win32gui.GetForegroundWindow() == hwnd)
         except Exception:
             iconic = visible = foreground = -1
-        if iconic and self._restore_minimized_window:
+        if iconic == 1 and self._restore_minimized_window:
             if not self._ensure_terraria_focused():
                 self._phase("recast_blocked window_restore_failed")
                 return False
@@ -2562,7 +2631,7 @@ class MemoryBot:
                 foreground = int(win32gui.GetForegroundWindow() == hwnd)
             except Exception:
                 iconic = visible = foreground = -1
-        if iconic or visible == 0 or foreground == 0:
+        if iconic == 1 or visible == 0 or foreground == 0:
             self._phase(
                 f"recast_blocked window_not_ready iconic={iconic} "
                 f"visible={visible} foreground={foreground}"

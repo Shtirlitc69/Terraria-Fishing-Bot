@@ -4,6 +4,27 @@ import shutil
 import sys
 from multiprocessing import freeze_support
 
+
+def _prepare_qt_dll_search_path() -> None:
+    """Expose bundled Qt DLLs before importing a PySide extension module.
+
+    PyInstaller normally installs a similar runtime hook.  Doing it here as
+    well makes the executable independent of hook ordering: ``QtGui.pyd``
+    needs Qt6Gui.dll (and its siblings) while this file is still importing.
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+
+    bundle_dir = getattr(sys, "_MEIPASS", "")
+    for name in ("PySide6", "shiboken6"):
+        directory = os.path.join(bundle_dir, name)
+        if os.path.isdir(directory):
+            os.add_dll_directory(directory)
+            os.environ["PATH"] = directory + os.pathsep + os.environ.get("PATH", "")
+
+
+_prepare_qt_dll_search_path()
+
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 

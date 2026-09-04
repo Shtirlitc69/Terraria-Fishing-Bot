@@ -251,11 +251,13 @@ def make_bot(statuses, verified=True):
 
 
 def run_scenario(
-    seed, on_status=None, until=None, timeout_s=10.0, verified=True
+    seed, on_status=None, until=None, timeout_s=10.0, verified=True, configure=None
 ):
     statuses = []
     bot = make_bot(statuses, verified=verified)
     bot._seed_state = seed
+    if configure is not None:
+        configure(bot)
     if on_status is not None:
         orig = bot.on_status
 
@@ -324,27 +326,90 @@ def test_dunk_one_click_dead_anim():
     assert not any(x.startswith("caught_recovery:") for x in statuses), statuses
 
 
-def test_skip_then_bass_dunk():
-    """Unknown dunk is yanked and recast; a later bass dunk still lands."""
+def test_skip_does_not_reel_then_bass_dunk_lands():
+    """A filtered dunk gets no click; a later allowed dunk on it still lands."""
 
     def seed(g):
         g.rolled = UNKNOWN_ID
         g.bobbers = 1
         g.ai1 = -8.0
-        g.redunk_ai1 = -8.0
-        g.redunk_rolled = BASS_ID
-        g.land_from_click = 2
+        g.land_from_click = 1
+
+    def after_skip(msg, game):
+        if msg != f"bite:{UNKNOWN_ID}:skip":
+            return
+        with game.lock:
+            game.ai1 = 0.0
+            game.rolled = 0
+
+        def next_bite():
+            with game.lock:
+                game.ai1 = -8.0
+                game.rolled = BASS_ID
+
+        threading.Timer(0.02, next_bite).start()
 
     statuses, _ = run_scenario(
         seed,
-        until=lambda s: f"catch:{BASS_ID}" in s and GAME.recasts >= 2,
+        on_status=after_skip,
+        until=lambda s: f"catch:{BASS_ID}" in s and GAME.recasts >= 1,
         timeout_s=8.0,
     )
     assert f"bite:{UNKNOWN_ID}:skip" in statuses, statuses
     assert f"catch:{BASS_ID}" in statuses, statuses
-    assert GAME.reel_clicks == 2, GAME.reel_clicks
-    assert GAME.recasts >= 2, GAME.recasts
+    assert f"catch:{UNKNOWN_ID}" not in statuses, statuses
+    assert GAME.reel_clicks == 1, GAME.reel_clicks
+    assert GAME.recasts == 1, GAME.recasts
     assert not any(x.startswith("error:") for x in statuses), statuses
+
+
+def test_skip_recasts_only_after_bobber_disappears():
+    """A filtered bite may recast only after the local bobber is gone."""
+
+    def seed(g):
+        g.rolled = UNKNOWN_ID
+        g.bobbers = 1
+        g.ai1 = -8.0
+
+    def after_skip(msg, game):
+        if msg == f"bite:{UNKNOWN_ID}:skip":
+            with game.lock:
+                game.ai1 = 0.0
+                game.bobbers = 0
+                game.rolled = 0
+
+    statuses, _ = run_scenario(
+        seed,
+        on_status=after_skip,
+        until=lambda s: GAME.recasts >= 1,
+    )
+    assert f"bite:{UNKNOWN_ID}:skip" in statuses, statuses
+    assert f"catch:{UNKNOWN_ID}" not in statuses, statuses
+    assert GAME.reel_clicks == 0, GAME.reel_clicks
+    assert GAME.recasts == 1, GAME.recasts
+
+
+def test_fallback_skip_never_recasts_from_empty_client_table():
+    """Multiplayer fallback must leave a filtered catch in the water."""
+
+    def seed(g):
+        g.rolled = UNKNOWN_ID
+        g.bobbers = 1
+
+    def configure(bot):
+        bot._dunk_fallback = True
+        bot._fallback_last_id = 0
+        bot._bobber_ai1 = lambda: None
+        bot._projectile_has_live_entries = lambda: False
+
+    statuses, _ = run_scenario(
+        seed,
+        configure=configure,
+        until=lambda s: f"bite:{UNKNOWN_ID}:skip" in s,
+    )
+    assert f"bite:{UNKNOWN_ID}:skip" in statuses, statuses
+    assert GAME.reel_clicks == 0, GAME.reel_clicks
+    assert GAME.recasts == 0, GAME.recasts
 
 
 def test_stale_id_without_dunk_does_not_reel():
@@ -443,6 +508,26 @@ def test_sanitize_bobber_present_sets_verified():
     assert bot._bobber_verified_layout is True, bot._bobber_verified_layout
     assert GAME.recasts == 0, GAME.recasts
     assert "initial_cast" not in statuses, statuses
+
+
+def test_empty_projectile_table_uses_fallback_without_clicking():
+    """Multiplayer's empty client table must not calibrate or auto-cast."""
+    statuses = []
+    bot = make_bot(statuses, verified=None)
+    bot._local_bobbers = lambda: []
+    bot._projectile_has_live_entries = lambda: False
+    bot._calibrate_bobber_layout = lambda: (_ for _ in ()).throw(
+        AssertionError("empty table must skip calibration")
+    )
+    bot._recast_until_bobber = lambda: (_ for _ in ()).throw(
+        AssertionError("empty table must not auto-cast")
+    )
+    bot._read_rolled = lambda: 0
+
+    MemoryBot._sanitize_start(bot)
+
+    assert bot._dunk_fallback is True
+    assert "dunk_unavailable" in statuses, statuses
 
 
 def test_sanitize_live_bobber_dunks_once():
@@ -1008,7 +1093,9 @@ def test_calib_stop_does_not_emit_timeout():
 SCENARIOS = [
     test_normal_catch,
     test_dunk_one_click_dead_anim,
-    test_skip_then_bass_dunk,
+    test_skip_does_not_reel_then_bass_dunk_lands,
+    test_skip_recasts_only_after_bobber_disappears,
+    test_fallback_skip_never_recasts_from_empty_client_table,
     test_stale_id_without_dunk_does_not_reel,
     test_two_bass_dunks,
     test_stop_releases_mouse,
@@ -1023,6 +1110,7 @@ SCENARIOS = [
     test_dunk_fallback_recovers_when_offsets_appear,
     test_one_dunk_yields_one_bite,
     test_sanitize_bobber_present_sets_verified,
+    test_empty_projectile_table_uses_fallback_without_clicking,
     test_sanitize_live_bobber_dunks_once,
     test_recast_click_holds_for_one_game_tick,
     test_recast_click_does_not_pulse_release_use_item,
